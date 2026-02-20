@@ -1,19 +1,57 @@
-// ============================================================
-// src/test/compilationStatus.test.ts
-// Unit tests for compilation status monitoring.
-// ============================================================
-
 declare function require(name: string): any;
 declare const process: { exitCode?: number };
+
+// Unit tests for compilation status monitoring
+// Run with:  node out-test/test/compilationStatus.test.js
+
+// ── Mock vscode ───────────────────────────────────────────────
+
+const mockVscode = {
+    EventEmitter: class {
+        private listeners: any[] = [];
+        fire(data: any) { this.listeners.forEach(l => l(data)); }
+        event = (l: any) => {
+            this.listeners.push(l);
+            return { dispose: () => { this.listeners = this.listeners.filter(i => i !== l); } };
+        };
+        dispose() { }
+    },
+    window: {
+        createOutputChannel: () => ({
+            appendLine: () => { },
+            dispose: () => { }
+        })
+    },
+    workspace: {
+        onDidChangeWorkspaceFolders: () => ({ dispose: () => { } })
+    },
+    CompilationStatus: {
+        IDLE: 'IDLE',
+        IN_PROGRESS: 'IN_PROGRESS',
+        SUCCESS: 'SUCCESS',
+        FAILED: 'FAILED',
+        WARNING: 'WARNING',
+        CANCELLED: 'CANCELLED'
+    }
+};
+
+// Hack to mock the 'vscode' module in Node.js
+const Module = require('module');
+const originalLoad = Module._load;
+Module._load = function (request: string, parent: any, isMain: boolean) {
+    if (request === 'vscode') {
+        return mockVscode;
+    }
+    return originalLoad.apply(this, arguments);
+};
+
+// ── Imports ───────────────────────────────────────────────────
 
 const assert = require('assert');
 import { CompilationStatusMonitor } from '../services/compilationStatusMonitor';
 import {
     CompilationStatus,
     CompilationDiagnosticSeverity,
-    CompilationEvent,
-    CompilationRecord,
-    ContractCompilationHistory,
     CompilationMonitorConfig
 } from '../types/compilationStatus';
 
@@ -28,7 +66,7 @@ class MockExtensionContext {
         get: <T>(key: string, defaultValue?: T): T | undefined => {
             return this.storage.get(key) ?? defaultValue;
         },
-        update: (key: string, value: any): Thenable<void> => {
+        update: (key: string, value: any): Promise<void> => {
             this.storage.set(key, value);
             return Promise.resolve();
         }
@@ -38,7 +76,7 @@ class MockExtensionContext {
         get: <T>(key: string, defaultValue?: T): T | undefined => {
             return this.storage.get(key) ?? defaultValue;
         },
-        update: (key: string, value: any): Thenable<void> => {
+        update: (key: string, value: any): Promise<void> => {
             this.storage.set(key, value);
             return Promise.resolve();
         }
@@ -58,7 +96,7 @@ const testContractName = 'test-contract';
 async function testStartCompilation() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         const event = monitor.startCompilation(testContractPath);
 
@@ -76,7 +114,7 @@ async function testStartCompilation() {
 async function testUpdateProgress() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.startCompilation(testContractPath);
         monitor.updateProgress(testContractPath, 50, 'Halfway done');
@@ -95,7 +133,7 @@ async function testUpdateProgress() {
 async function testReportSuccess() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.startCompilation(testContractPath);
         const record = monitor.reportSuccess(testContractPath, '/test/output.wasm');
@@ -113,7 +151,7 @@ async function testReportSuccess() {
 async function testReportFailure() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.startCompilation(testContractPath);
         const diagnostics = [{
@@ -138,7 +176,7 @@ async function testReportFailure() {
 async function testReportCancellation() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.startCompilation(testContractPath);
         const record = monitor.reportCancellation(testContractPath);
@@ -155,7 +193,7 @@ async function testReportCancellation() {
 async function testTrackMultipleContracts() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         const contract1 = '/test/contracts/contract1';
         const contract2 = '/test/contracts/contract2';
@@ -181,7 +219,7 @@ async function testTrackMultipleContracts() {
 async function testGetInProgressContracts() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         const contract1 = '/test/contracts/contract1';
         const contract2 = '/test/contracts/contract2';
@@ -202,7 +240,7 @@ async function testGetInProgressContracts() {
 async function testIsAnyCompilationInProgress() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         assert.strictEqual(monitor.isAnyCompilationInProgress(), false);
 
@@ -220,7 +258,7 @@ async function testIsAnyCompilationInProgress() {
 async function testStoreCompilationHistory() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.startCompilation(testContractPath);
         monitor.reportSuccess(testContractPath, '/test/output.wasm');
@@ -240,7 +278,7 @@ async function testStoreCompilationHistory() {
 async function testTrackMultipleCompilations() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.startCompilation(testContractPath);
         monitor.reportSuccess(testContractPath, '/test/output1.wasm');
@@ -270,7 +308,7 @@ async function testLimitHistorySize() {
         showProgressNotifications: false
     };
     const monitor = new CompilationStatusMonitor(mockContext as any, config);
-    
+
     try {
         for (let i = 0; i < 5; i++) {
             monitor.startCompilation(testContractPath);
@@ -288,7 +326,7 @@ async function testLimitHistorySize() {
 async function testClearHistory() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.startCompilation(testContractPath);
         monitor.reportSuccess(testContractPath, '/test/output.wasm');
@@ -306,7 +344,7 @@ async function testClearHistory() {
 async function testClearAllHistory() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         const contract1 = '/test/contracts/contract1';
         const contract2 = '/test/contracts/contract2';
@@ -329,7 +367,7 @@ async function testClearAllHistory() {
 async function testWorkspaceSummary() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         const contract1 = '/test/contracts/contract1';
         const contract2 = '/test/contracts/contract2';
@@ -357,7 +395,7 @@ async function testWorkspaceSummary() {
 async function testDefaultConfiguration() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         const config = monitor.getConfig();
         assert.strictEqual(config.maxHistoryPerContract, 50);
@@ -373,7 +411,7 @@ async function testDefaultConfiguration() {
 async function testUpdateConfiguration() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.updateConfig({
             maxHistoryPerContract: 10,
@@ -393,7 +431,7 @@ async function testUpdateConfiguration() {
 async function testResetStatus() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.startCompilation(testContractPath);
         monitor.reportSuccess(testContractPath, '/test/output.wasm');
@@ -409,10 +447,125 @@ async function testResetStatus() {
     }
 }
 
+async function testParseErrorDiagnostics() {
+    const mockContext = new MockExtensionContext();
+    const monitor = new CompilationStatusMonitor(mockContext as any);
+
+    try {
+        const output = `
+error[E0001]: type mismatch
+  --> src/lib.rs:42:10
+   |
+42 |     let x: i32 = "string";
+   |                    ^^^^^^^ expected i32, found &str
+
+error: aborting due to previous error
+        `;
+
+        const diagnostics = monitor.parseDiagnostics(output, testContractPath);
+        assert.strictEqual(diagnostics.length, 2);
+        assert.strictEqual(diagnostics[0].severity, CompilationDiagnosticSeverity.ERROR);
+        assert.strictEqual(diagnostics[0].code, 'E0001');
+        assert.strictEqual(diagnostics[0].file, 'src/lib.rs');
+        assert.strictEqual(diagnostics[0].line, 42);
+        assert.strictEqual(diagnostics[0].column, 10);
+        console.log('  [ok] should parse error diagnostics from output');
+    } finally {
+        monitor.dispose();
+    }
+}
+
+async function testParseWarningDiagnostics() {
+    const mockContext = new MockExtensionContext();
+    const monitor = new CompilationStatusMonitor(mockContext as any);
+
+    try {
+        const output = `
+warning: unused variable
+  --> src/main.rs:10:5
+   |
+10 |     let unused = 42;
+   |         ^^^^^^
+   |
+   = note: #[warn(unused_variables)] on by default
+        `;
+
+        const diagnostics = monitor.parseDiagnostics(output, testContractPath);
+        assert.strictEqual(diagnostics.length, 1);
+        assert.strictEqual(diagnostics[0].severity, CompilationDiagnosticSeverity.WARNING);
+        assert.strictEqual(diagnostics[0].file, 'src/main.rs');
+        assert.strictEqual(diagnostics[0].line, 10);
+        assert.strictEqual(diagnostics[0].column, 5);
+        console.log('  [ok] should parse warning diagnostics from output');
+    } finally {
+        monitor.dispose();
+    }
+}
+
+async function testParseEmptyOutput() {
+    const mockContext = new MockExtensionContext();
+    const monitor = new CompilationStatusMonitor(mockContext as any);
+
+    try {
+        const diagnostics = monitor.parseDiagnostics('', testContractPath);
+        assert.strictEqual(diagnostics.length, 0);
+        console.log('  [ok] should handle empty output');
+    } finally {
+        monitor.dispose();
+    }
+}
+
+async function testEmitStatusChangeEvents() {
+    const mockContext = new MockExtensionContext();
+    const monitor = new CompilationStatusMonitor(mockContext as any);
+
+    try {
+        await new Promise<void>((resolve, reject) => {
+            monitor.onStatusChange((event: any) => {
+                try {
+                    assert.strictEqual(event.contractPath, testContractPath);
+                    assert.strictEqual(event.previousStatus, CompilationStatus.IDLE);
+                    assert.strictEqual(event.currentStatus, CompilationStatus.IN_PROGRESS);
+                    assert.ok(event.timestamp > 0);
+                    resolve();
+                } catch (err) {
+                    reject(err);
+                }
+            });
+            monitor.startCompilation(testContractPath);
+        });
+        console.log('  [ok] should emit status change events');
+    } finally {
+        monitor.dispose();
+    }
+}
+
+async function testEmitCompilationEvents() {
+    const mockContext = new MockExtensionContext();
+    const monitor = new CompilationStatusMonitor(mockContext as any);
+
+    try {
+        await new Promise<void>((resolve, reject) => {
+            monitor.onCompilationEvent((event: any) => {
+                try {
+                    assert.strictEqual(event.status, CompilationStatus.IN_PROGRESS);
+                    resolve();
+                } catch (err) {
+                    reject(err);
+                }
+            });
+            monitor.startCompilation(testContractPath);
+        });
+        console.log('  [ok] should emit compilation events');
+    } finally {
+        monitor.dispose();
+    }
+}
+
 async function testHandleNonExistentContract() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         const status = monitor.getCurrentStatus('/non/existent/path');
         assert.strictEqual(status, undefined);
@@ -425,7 +578,7 @@ async function testHandleNonExistentContract() {
 async function testHandleProgressUpdateNonExistent() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
         monitor.updateProgress('/non/existent/path', 50, 'Halfway');
 
@@ -440,9 +593,9 @@ async function testHandleProgressUpdateNonExistent() {
 async function testMultipleStartCalls() {
     const mockContext = new MockExtensionContext();
     const monitor = new CompilationStatusMonitor(mockContext as any);
-    
+
     try {
-        const event1 = monitor.startCompilation(testContractPath);
+        monitor.startCompilation(testContractPath);
         const event2 = monitor.startCompilation(testContractPath);
 
         const status = monitor.getCurrentStatus(testContractPath);
@@ -476,6 +629,11 @@ async function run() {
         testDefaultConfiguration,
         testUpdateConfiguration,
         testResetStatus,
+        testParseErrorDiagnostics,
+        testParseWarningDiagnostics,
+        testParseEmptyOutput,
+        testEmitStatusChangeEvents,
+        testEmitCompilationEvents,
         testHandleNonExistentContract,
         testHandleProgressUpdateNonExistent,
         testMultipleStartCalls,
@@ -506,4 +664,3 @@ run().catch(err => {
     console.error('Test runner error:', err);
     process.exitCode = 1;
 });
-

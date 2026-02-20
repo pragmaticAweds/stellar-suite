@@ -13,6 +13,8 @@ import {
     logCliError,
     parseCliErrorOutput,
 } from '../utils/cliErrorParser';
+import { DeploymentRetryService, RetryDeploymentParams } from './deploymentRetryService';
+import { DeploymentRetryConfig, DeploymentRetryRecord } from '../types/deploymentRetry';
 
 function getEnvironmentWithPath(): NodeJS.ProcessEnv {
     const env = { ...process.env };
@@ -83,12 +85,66 @@ export class ContractDeployer {
     private source: string;
     private network: string;
     private readonly streamingService: CliOutputStreamingService;
+    private readonly retryService: DeploymentRetryService;
 
     constructor(cliPath: string, source: string = 'dev', network: string = 'testnet') {
         this.cliPath = cliPath;
         this.source = source;
         this.network = network;
         this.streamingService = new CliOutputStreamingService();
+        this.retryService = new DeploymentRetryService();
+    }
+
+    /**
+     * Deploy a contract with automatic retry and exponential backoff.
+     *
+     * Wraps {@link deployContract} with configurable retry logic. Transient
+     * failures (network errors, timeouts, rate limits) are retried automatically;
+     * permanent failures (invalid WASM, auth errors) are surfaced immediately.
+     *
+     * @param wasmPath     Path to the compiled WASM file
+     * @param retryConfig  Optional retry policy overrides
+     * @returns            The completed retry session record
+     */
+    async deployWithRetry(
+        wasmPath: string,
+        retryConfig?: DeploymentRetryConfig
+    ): Promise<DeploymentRetryRecord> {
+        const params: RetryDeploymentParams = {
+            wasmPath,
+            network: this.network,
+            source: this.source,
+            cliPath: this.cliPath,
+            retryConfig,
+        };
+        return this.retryService.deploy(params);
+    }
+
+    /**
+     * Cancel an active retry-managed deployment by its session ID.
+     *
+     * @param sessionId  The session ID returned by {@link deployWithRetry}
+     * @returns          `true` if the session was found and cancelled
+     */
+    cancelRetry(sessionId: string): boolean {
+        return this.retryService.cancel(sessionId);
+    }
+
+    /**
+     * Retrieve the retry history for deployments run through this deployer instance.
+     */
+    getRetryHistory(): DeploymentRetryRecord[] {
+        return this.retryService.getHistory();
+    }
+
+    /**
+     * Register a callback to receive live retry status events.
+     * Returns a disposer that removes the listener.
+     */
+    onRetryStatusChange(
+        listener: Parameters<DeploymentRetryService['onStatusChange']>[0]
+    ): () => void {
+        return this.retryService.onStatusChange(listener);
     }
 
     async buildContract(

@@ -1,4 +1,3 @@
-
 // ============================================================
 // src/ui/sidebarView.ts
 // WebviewView provider — context menu + drag-and-drop reordering.
@@ -35,6 +34,8 @@ import {
 import { ImportSelection, ImportPreview } from '../types/sidebarExport';
 import { ContractDependencyDetectionService, DependencyGraph } from '../services/contractDependencyDetectionService';
 import { ContractMetadataService } from '../services/contractMetadataService';
+import { CliHistoryService, CliHistoryEntry } from '../services/cliHistoryService';
+import { CliReplayService } from '../services/cliReplayService';
 
 export interface ContractInfo {
     name: string;
@@ -116,7 +117,9 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
-        private readonly _context: vscode.ExtensionContext
+        private readonly _context: vscode.ExtensionContext,
+        private readonly _cliHistoryService?: CliHistoryService,
+        private readonly _cliReplayService?: CliReplayService
     ) {
         this.outputChannel = vscode.window.createOutputChannel('Stellar Suite');
         this.contextMenuService = new ContractContextMenuService(
@@ -148,6 +151,23 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         };
 
         webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+
+        // ── Keyboard shortcut settings sync ─────────────────────
+        const sendSettings = () => {
+            const config = vscode.workspace.getConfiguration('stellarSuite');
+            this._view?.webview.postMessage({
+                type: 'settings:update',
+                showShortcutHints: config.get<boolean>('keyboard.showHints', true),
+            });
+        };
+        setTimeout(sendSettings, 100);
+
+        const configListener = vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('stellarSuite.keyboard')) {
+                sendSettings();
+            }
+        });
+        webviewView.onDidDispose(() => { configListener.dispose(); });
 
         webviewView.webview.onDidReceiveMessage(async (message: {
             type: string;
@@ -357,7 +377,6 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                             ? { type: 'success', message: 'Simulation entry deleted.' }
                             : { type: 'error', message: 'Entry not found.' },
                     });
-                    // Refresh the history panel
                     if (deleted) {
                         const refreshedEntries = historyService.queryHistory({ limit: 50 });
                         const refreshedStats = historyService.getStatistics();
@@ -536,6 +555,66 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
+                // ── CLI history ──────────────────────────────────
+
+                case 'cliHistory:getAll': {
+                    if (!this._cliHistoryService) { break; }
+                    const filterObj = message['filter'] as Record<string, unknown> | undefined;
+                    const entries = this._cliHistoryService.queryHistory(filterObj as any);
+                    this._view?.webview.postMessage({
+                        type: 'cliHistory:data',
+                        entries
+                    });
+                    break;
+                }
+
+                case 'cliHistory:replay': {
+                    const entryId = message['entryId'] as string | undefined;
+                    if (entryId) {
+                        await vscode.commands.executeCommand('stellarSuite.replayCliCommand', entryId);
+                    }
+                    break;
+                }
+
+                case 'cliHistory:modify': {
+                    const entryId = message['entryId'] as string | undefined;
+                    if (entryId) {
+                        await vscode.commands.executeCommand('stellarSuite.modifyAndReplayCliCommand', entryId);
+                    }
+                    break;
+                }
+
+                case 'cliHistory:label': {
+                    if (!this._cliHistoryService) { break; }
+                    const entryId = message['entryId'] as string | undefined;
+                    const label = message['label'] as string | undefined;
+                    if (entryId && label) {
+                        await this._cliHistoryService.setLabel(entryId, label);
+                        this.refreshHistory();
+                    }
+                    break;
+                }
+
+                case 'cliHistory:delete': {
+                    if (!this._cliHistoryService) { break; }
+                    const entryId = message['entryId'] as string | undefined;
+                    if (entryId) {
+                        await this._cliHistoryService.deleteEntry(entryId);
+                        this.refreshHistory();
+                    }
+                    break;
+                }
+
+                case 'cliHistory:clear': {
+                    await vscode.commands.executeCommand('stellarSuite.clearCliHistory');
+                    break;
+                }
+
+                case 'cliHistory:export': {
+                    await vscode.commands.executeCommand('stellarSuite.exportCliHistory');
+                    break;
+                }
+
                 default:
                     this.outputChannel.appendLine(`[Sidebar] Unknown message type: ${message.type}`);
             }
@@ -550,21 +629,32 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
 
         const discovered = this._discoverContracts();
         const ordered = this.reorderingService.applyOrder(discovered);
-        
+
         // Build dependency graph
         await this._enrichWithDependencyInfo(ordered);
-        
+
         this._lastContracts = ordered;
 
         const deployments = this._getDeploymentHistory();
         const versionStates = this._getVersionStates(ordered);
-        this._view.webview.postMessage({ 
-            type: 'update', 
-            contracts: ordered, 
-            deployments, 
+
+        // FIX: Removed duplicate postMessage call; keeping the one with dependencyGraph
+        this._view.webview.postMessage({
+            type: 'update',
+            contracts: ordered,
+            deployments,
             versionStates,
             dependencyGraph: this.dependencyGraph ? this._serializeDependencyGraph() : null
         });
+        this.refreshHistory();
+    }
+
+    private refreshHistory() {
+        if (!this._view) { return; }
+        if (this._cliHistoryService) {
+            const entries = this._cliHistoryService.queryHistory();
+            this._view.webview.postMessage({ type: 'cliHistory:data', entries });
+        }
     }
 
     /** Expose versionTracker for use by commands (e.g. deployContract). */
@@ -573,25 +663,25 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     }
 
     public showDeploymentResult(deploymentInfo: unknown) {
-        this.outputChannel.appendLine(`[Sidebar] Deployment result: ${JSON.stringify(deploymentInfo)}`);
+        this.outputChannel.appendLine(`[Sidebar] Deployment result: ${JSON.stringify(deploymentInfo)} `);
         this.refresh();
     }
 
     public showSimulationResult(contractId: string, result: unknown) {
-        this.outputChannel.appendLine(`[Sidebar] Simulation result for ${contractId}: ${JSON.stringify(result)}`);
+        this.outputChannel.appendLine(`[Sidebar] Simulation result for ${contractId}: ${JSON.stringify(result)} `);
         this.refresh();
     }
 
-    // ── Contract discovery ────────────────────────────────────
+    // ── Contract discovery ────────────────────────────────────────
 
     private _discoverContracts(): ContractInfo[] {
         const workspaceFolders = vscode.workspace.workspaceFolders;
         if (!workspaceFolders) { return []; }
 
         const deploymentHistory = this._getDeploymentHistory();
-        const hidden          = this._context.workspaceState.get<string[]>('stellarSuite.hiddenContracts', []);
-        const aliases         = this._context.workspaceState.get<Record<string, string>>('stellarSuite.contractAliases', {});
-        const pinned          = this._context.workspaceState.get<string[]>('stellarSuite.pinnedContracts', []);
+        const hidden = this._context.workspaceState.get<string[]>('stellarSuite.hiddenContracts', []);
+        const aliases = this._context.workspaceState.get<Record<string, string>>('stellarSuite.contractAliases', {});
+        const pinned = this._context.workspaceState.get<string[]>('stellarSuite.pinnedContracts', []);
         const networkOverrides = this._context.workspaceState.get<Record<string, string>>('stellarSuite.contractNetworkOverrides', {});
         const manualTemplateAssignments = this._context.workspaceState.get<Record<string, string>>(
             'stellarSuite.manualTemplateAssignments',
@@ -601,7 +691,17 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         const contracts: ContractInfo[] = [];
 
         for (const folder of workspaceFolders) {
-            const found = this._findContracts(folder.uri.fsPath, 0, deploymentHistory);
+            const templateConfig = this.templateService.loadTemplateConfiguration(folder.uri.fsPath);
+            if (templateConfig.warnings.length > 0) {
+                for (const warning of templateConfig.warnings) {
+                    this.outputChannel.appendLine(`[Template] ${warning} `);
+                }
+            }
+
+            const found = this._findContracts(folder.uri.fsPath, 0, deploymentHistory, {
+                customTemplates: templateConfig.templates,
+                manualTemplateAssignments,
+            });
             for (const c of found) {
                 if (hidden.includes(c.path)) { continue; }
                 if (aliases[c.path]) { c.name = aliases[c.path]; }
@@ -615,7 +715,15 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         return contracts;
     }
 
-    private _findContracts(rootPath: string, depth = 0, deploymentHistory: DeploymentRecord[] = []): ContractInfo[] {
+    private _findContracts(
+        rootPath: string,
+        depth = 0,
+        deploymentHistory: DeploymentRecord[] = [],
+        options?: {
+            customTemplates?: TemplateDefinition[];
+            manualTemplateAssignments?: Record<string, string>;
+        }
+    ): ContractInfo[] {
         if (depth > 4) { return []; }
         const results: ContractInfo[] = [];
 
@@ -637,14 +745,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                 const contractName = nameMatch ? nameMatch[1] : path.basename(rootPath);
 
                 const wasmPath = path.join(rootPath, 'target', 'wasm32-unknown-unknown', 'release');
-                const isBuilt  = fs.existsSync(wasmPath) &&
+                const isBuilt = fs.existsSync(wasmPath) &&
                     fs.readdirSync(wasmPath).some((f: string) => f.endsWith('.wasm'));
 
                 const deployedContracts = this._context.workspaceState.get<Record<string, string>>(
                     'stellarSuite.deployedContracts', {}
                 );
                 const contractId = deployedContracts[rootPath];
-                const config     = vscode.workspace.getConfiguration('stellarSuite');
+                const config = vscode.workspace.getConfiguration('stellarSuite');
                 const lastDeployment = contractId
                     ? [...deploymentHistory].reverse().find(d => d.contractId === contractId)
                     : undefined;
@@ -653,11 +761,18 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                 const versionState = this.versionTracker.getContractVersionState(
                     cargoPath, contractName
                 );
+
+                const manualTemplateAssignments = this._context.workspaceState.get<Record<string, string>>(
+                    'stellarSuite.manualTemplateAssignments',
+                    {}
+                );
+
+                // FIX: Removed duplicate manualTemplateId key; keeping the one that uses manualTemplateAssignments
                 const templateResult = this.templateService.detectTemplate({
                     cargoTomlPath: cargoPath,
                     contractDir: rootPath,
                     contractName,
-                    manualTemplateId: undefined,
+                    manualTemplateId: manualTemplateAssignments[cargoPath],
                     customTemplates: [],
                 });
 
@@ -666,14 +781,14 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                     path: cargoPath,
                     contractId,
                     isBuilt,
-                    hasWasm:              isBuilt,
-                    deployedAt:           lastDeployment?.deployedAt,
-                    lastDeployed:         lastDeployment?.deployedAt,
-                    network:              lastDeployment?.network ?? config.get<string>('network', 'testnet'),
-                    source:               lastDeployment?.source  ?? config.get<string>('source',  'dev'),
-                    localVersion:         versionState.localVersion,
-                    deployedVersion:      versionState.deployedVersion,
-                    hasVersionMismatch:   versionState.hasMismatch,
+                    hasWasm: isBuilt,
+                    deployedAt: lastDeployment?.deployedAt,
+                    lastDeployed: lastDeployment?.deployedAt,
+                    network: lastDeployment?.network ?? config.get<string>('network', 'testnet'),
+                    source: lastDeployment?.source ?? config.get<string>('source', 'dev'),
+                    localVersion: versionState.localVersion,
+                    deployedVersion: versionState.deployedVersion,
+                    hasVersionMismatch: versionState.hasMismatch,
                     versionMismatchMessage: versionState.mismatch?.message,
                     templateId: templateResult.templateId,
                     templateCategory: templateResult.category,
@@ -706,7 +821,6 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
     }
 
     private _getSimulationHistoryService(): SimulationHistoryService | undefined {
-        // Lazily create a SimulationHistoryService scoped to the workspace
         if (!this._simulationHistoryService) {
             this._simulationHistoryService = new SimulationHistoryService(
                 this._context,
@@ -721,25 +835,22 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
      */
     private async _enrichWithDependencyInfo(contracts: ContractInfo[]): Promise<void> {
         try {
-            // Build metadata for contracts
             const metadataService = new ContractMetadataService(
                 vscode.workspace as any,
                 this.outputChannel
             );
             const scan = await metadataService.scanWorkspace();
-            
+
             if (scan.contracts.length === 0) {
                 return;
             }
 
-            // Build dependency graph
             this.dependencyGraph = await this.dependencyService.buildDependencyGraph(scan.contracts, {
                 detectImports: true,
                 includeDevDependencies: false,
                 includeBuildDependencies: true,
             });
 
-            // Enrich contract info with dependency data
             for (const contract of contracts) {
                 const contractMeta = scan.contracts.find(c => c.cargoTomlPath === contract.path);
                 if (!contractMeta) {
@@ -756,8 +867,6 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
                     contract.dependencyCount = node.dependencyCount;
                     contract.dependentCount = node.dependentCount;
                     contract.dependencyDepth = node.depth;
-                    
-                    // Check if part of circular dependency
                     contract.hasCircularDependency = this.dependencyGraph.cycles.some(cycle =>
                         cycle.some(path => path.includes(contractMeta.contractName))
                     );
@@ -807,542 +916,651 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider {
         return /* html */`<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
-<title>Stellar Suite</title>
-<style>
-/* ── Reset & Variables ──────────────────────────────────── */
-* { box-sizing: border-box; margin: 0; padding: 0; }
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+    <title>Stellar Suite</title>
+    <style>
+        /* ── Reset & Variables ──────────────────────────────────── */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
 
-:root {
-    --color-bg:           var(--vscode-sideBar-background);
-    --color-fg:           var(--vscode-foreground);
-    --color-muted:        var(--vscode-descriptionForeground);
-    --color-accent:       var(--vscode-textLink-foreground);
-    --color-border:       var(--vscode-panel-border);
-    --color-card:         var(--vscode-editor-background);
-    --color-card-hover:   var(--vscode-list-hoverBackground);
-    --color-btn-bg:       var(--vscode-button-background);
-    --color-btn-fg:       var(--vscode-button-foreground);
-    --color-btn-hover:    var(--vscode-button-hoverBackground);
-    --color-danger:       var(--vscode-errorForeground, #f14c4c);
-    --color-success:      #3fb950;
-    --color-accent-dim:   rgba(88,166,255,0.15);
-    --radius:             6px;
-    --shadow:             0 4px 16px rgba(0,0,0,0.4);
-}
+        :root {
+            --color-bg: var(--vscode-sideBar-background);
+            --color-fg: var(--vscode-foreground);
+            --color-muted: var(--vscode-descriptionForeground);
+            --color-accent: var(--vscode-textLink-foreground);
+            --color-border: var(--vscode-panel-border);
+            --color-card: var(--vscode-editor-background);
+            --color-card-hover: var(--vscode-list-hoverBackground);
+            --color-btn-bg: var(--vscode-button-background);
+            --color-btn-fg: var(--vscode-button-foreground);
+            --color-btn-hover: var(--vscode-button-hoverBackground);
+            --color-danger: var(--vscode-errorForeground, #f14c4c);
+            --color-success: #3fb950;
+            --color-accent-dim: rgba(88, 166, 255, 0.15);
+            --radius: 6px;
+            --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        }
 
-body {
-    font-family: var(--vscode-font-family);
-    font-size:   var(--vscode-font-size, 13px);
-    color:       var(--color-fg);
-    background:  var(--color-bg);
-    padding:     0;
-    user-select: none;
-}
+        body {
+            font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size, 13px);
+            color: var(--color-fg);
+            background: var(--color-bg);
+            padding: 0;
+            user-select: none;
+        }
 
-/* ── Header ─────────────────────────────────────────────── */
-.header {
-    display:         flex;
-    align-items:     center;
-    justify-content: space-between;
-    padding:         12px 14px 8px;
-    gap:             6px;
-}
-.header h1 {
-    font-size:      13px;
-    font-weight:    700;
-    letter-spacing: 0.5px;
-    flex:           1;
-}
-.header-actions { display: flex; gap: 4px; }
-.icon-btn {
-    background:    transparent;
-    border:        none;
-    cursor:        pointer;
-    color:         var(--color-muted);
-    padding:       4px 6px;
-    border-radius: 4px;
-    font-size:     12px;
-    white-space:   nowrap;
-}
-.icon-btn:hover { color: var(--color-fg); background: var(--color-card-hover); }
+        /* ── Header ─────────────────────────────────────────────── */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 14px 8px;
+            gap: 6px;
+        }
+        .header h1 {
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            flex: 1;
+        }
+        .header-actions { display: flex; gap: 4px; }
+        .icon-btn {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            color: var(--color-muted);
+            padding: 4px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        .icon-btn:hover { color: var(--color-fg); background: var(--color-card-hover); }
 
-/* ── Section headings ───────────────────────────────────── */
-.section-label {
-    font-size:      11px;
-    font-weight:    700;
-    letter-spacing: 0.8px;
-    text-transform: uppercase;
-    color:          var(--color-muted);
-    padding:        8px 14px 4px;
-}
+        /* ── Section headings ───────────────────────────────────── */
+        .section-label {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            color: var(--color-muted);
+            padding: 8px 14px 4px;
+        }
 
-/* ── Contract cards ─────────────────────────────────────── */
-#contracts-list { padding: 0 8px 8px; }
+        /* ── Contract cards ─────────────────────────────────────── */
+        #contracts-list { padding: 0 8px 8px; }
 
-.contract-card {
-    background:    var(--color-card);
-    border:        1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding:       10px 12px;
-    margin-bottom: 6px;
-    cursor:        grab;
-    transition:    border-color 0.15s, background 0.15s, opacity 0.15s, transform 0.15s;
-    position:      relative;
-}
-.contract-card:hover  { border-color: var(--color-accent); background: var(--color-card-hover); }
-.contract-card:active { cursor: grabbing; }
+        .contract-card {
+            background: var(--color-card);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            margin-bottom: 6px;
+            cursor: grab;
+            transition: border-color 0.15s, background 0.15s, opacity 0.15s, transform 0.15s;
+            position: relative;
+        }
+        .contract-card:hover  { border-color: var(--color-accent); background: var(--color-card-hover); }
+        .contract-card:focus  {
+            outline:      2px solid var(--vscode-focusBorder);
+            border-color: var(--color-accent);
+            background:   var(--color-card-hover);
+        }
+        .contract-card:active { cursor: grabbing; }
 
-.contract-card.pinned::before {
-    content:       '';
-    position:      absolute;
-    top: 0; left: 0;
-    width:         3px;
-    height:        100%;
-    background:    var(--color-accent);
-    border-radius: var(--radius) 0 0 var(--radius);
-}
+        /* ── Shortcut hints ──────────────────────────────────────── */
+        .shortcut-hints {
+            display:     none;
+            flex-wrap:   wrap;
+            gap:         6px;
+            margin-top:  6px;
+            font-size:   10px;
+            color:       var(--color-muted);
+        }
+        .shortcut-hints.visible { display: flex; }
+        .shortcut-hint kbd {
+            display:        inline-block;
+            background:     rgba(255,255,255,.08);
+            border:         1px solid var(--color-border);
+            border-radius:  3px;
+            padding:        0 4px;
+            font-family:    inherit;
+            font-size:      10px;
+            line-height:    1.6;
+            margin-right:   2px;
+        }
 
-/* ── Drag states ─────────────────────────────────────────── */
-.contract-card.dragging {
-    opacity:      0.4;
-    transform:    scale(0.98);
-    cursor:       grabbing;
-    border-style: dashed;
-}
-.contract-card.drop-target-above::before {
-    content:       '';
-    position:      absolute;
-    top:           -4px;
-    left:          0; right: 0;
-    height:        3px;
-    background:    var(--color-accent);
-    border-radius: 2px;
-    width:         100%;
-    z-index:       10;
-}
-.contract-card.drop-target-below::after {
-    content:       '';
-    position:      absolute;
-    bottom:        -4px;
-    left:          0; right: 0;
-    height:        3px;
-    background:    var(--color-accent);
-    border-radius: 2px;
-    z-index:       10;
-}
+        /* ── Screen reader only ──────────────────────────────────── */
+        .sr-only {
+            position:   absolute;
+            width:      1px;
+            height:     1px;
+            padding:    0;
+            margin:     -1px;
+            overflow:   hidden;
+            clip:       rect(0,0,0,0);
+            white-space: nowrap;
+            border:     0;
+        }
 
-.drag-handle {
-    display:       flex;
-    align-items:   center;
-    color:         var(--color-muted);
-    padding-right: 8px;
-    opacity:       0;
-    transition:    opacity 0.1s;
-    flex-shrink:   0;
-    font-size:     14px;
-    cursor:        grab;
-    line-height:   1;
-}
-.contract-card:hover .drag-handle          { opacity: 1; }
-.contract-card.pinned .drag-handle         { opacity: 0.3; cursor: not-allowed; }
+        .contract-card.pinned::before {
+            content:       '';
+            position:      absolute;
+            top: 0; left: 0;
+            width: 3px;
+            height: 100%;
+            background: var(--color-accent);
+            border-radius: var(--radius) 0 0 var(--radius);
+        }
 
-/* ── Card layout ─────────────────────────────────────────── */
-.card-header {
-    display:       flex;
-    align-items:   center;
-    gap:           6px;
-    margin-bottom: 6px;
-}
-.contract-name {
-    font-weight:   600;
-    color:         var(--color-accent);
-    flex:          1;
-    overflow:      hidden;
-    text-overflow: ellipsis;
-    white-space:   nowrap;
-}
+        /* ── Drag states ─────────────────────────────────────────── */
+        .contract-card.dragging {
+            opacity: 0.4;
+            transform: scale(0.98);
+            cursor: grabbing;
+            border-style: dashed;
+        }
+        .contract-card.drop-target-above::before {
+            content: '';
+            position: absolute;
+            top: -4px;
+            left: 0; right: 0;
+            height: 3px;
+            background: var(--color-accent);
+            border-radius: 2px;
+            width: 100%;
+            z-index: 10;
+        }
+        .contract-card.drop-target-below::after {
+            content: '';
+            position: absolute;
+            bottom: -4px;
+            left: 0; right: 0;
+            height: 3px;
+            background: var(--color-accent);
+            border-radius: 2px;
+            z-index: 10;
+        }
 
-.badge {
-    font-size:     10px;
-    font-weight:   600;
-    padding:       1px 6px;
-    border-radius: 10px;
-    white-space:   nowrap;
-}
-.badge-deployed  { background: rgba(63,185,80,.2);      color: var(--color-success); border: 1px solid rgba(63,185,80,.4); }
-.badge-built     { background: var(--color-accent-dim); color: var(--color-accent);  border: 1px solid rgba(88,166,255,.3); }
-.badge-not-built { background: rgba(255,255,255,.05);   color: var(--color-muted);   border: 1px solid var(--color-border); }
-.badge-version   { background: rgba(180,120,255,.15);   color: #b478ff;              border: 1px solid rgba(180,120,255,.35); }
-.badge-mismatch  { background: rgba(241,76,76,.15);     color: var(--color-danger);  border: 1px solid rgba(241,76,76,.4); }
-.badge-template-token   { background: rgba(60, 170, 255, .16); color: #6ec3ff; border: 1px solid rgba(60, 170, 255, .35); }
-.badge-template-escrow  { background: rgba(255, 164, 66, .14); color: #ffb86a; border: 1px solid rgba(255, 164, 66, .34); }
-.badge-template-voting  { background: rgba(100, 195, 110, .15); color: #72d67d; border: 1px solid rgba(100, 195, 110, .34); }
-.badge-template-custom  { background: rgba(187, 134, 252, .14); color: #c59bff; border: 1px solid rgba(187, 134, 252, .36); }
-.badge-template-unknown { background: rgba(255,255,255,.05); color: var(--color-muted); border: 1px solid var(--color-border); }
+        .drag-handle {
+            display: flex;
+            align-items: center;
+            color: var(--color-muted);
+            padding-right: 8px;
+            opacity: 0;
+            transition:    opacity 0.1s;
+            flex-shrink: 0;
+            font-size: 14px;
+            cursor: grab;
+            line-height: 1;
+        }
+        .contract-card:hover .drag-handle          { opacity: 1; }
+        .contract-card.pinned .drag-handle         { opacity: 0.3; cursor: not-allowed; }
 
-/* ── Dependency info ─────────────────────────────────────── */
-.dependency-info {
-    display:      flex;
-    flex-wrap:    wrap;
-    gap:          4px;
-    margin-top:   6px;
-    margin-bottom: 8px;
-}
-.dep-badge {
-    background:   rgba(100, 150, 255, .12);
-    color:        #88b4ff;
-    border:       1px solid rgba(100, 150, 255, .3);
-    padding:      2px 6px;
-    border-radius: 8px;
-    white-space:  nowrap;
-    font-size:    9px;
-    font-weight:  500;
-}
-.dep-circular {
-    background:   rgba(241, 76, 76, .15);
-    color:        var(--color-danger);
-    border:       1px solid rgba(241, 76, 76, .4);
-    font-weight:  600;
-}
+        /* ── Card layout ─────────────────────────────────────────── */
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 6px;
+        }
+        .contract-name {
+            font-weight: 600;
+            color: var(--color-accent);
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
 
-.contract-meta {
-    font-size:     11px;
-    color:         var(--color-muted);
-    margin-bottom: 8px;
-    line-height:   1.5;
-}
-.contract-id {
-    font-family:   monospace;
-    font-size:     10px;
-    color:         var(--color-muted);
-    word-break:    break-all;
-    margin-bottom: 6px;
-    background:    rgba(255,255,255,.04);
-    padding:       3px 5px;
-    border-radius: 3px;
-}
+        /* ── FIX: Removed duplicate .badge / .badge-* block — keeping this correct one ── */
+        .badge {
+            font-size:     10px;
+            font-weight:   600;
+            padding:       1px 6px;
+            border-radius: 10px;
+            white-space:   nowrap;
+        }
+        .badge-deployed  { background: rgba(63,185,80,.2);      color: var(--color-success); border: 1px solid rgba(63,185,80,.4); }
+        .badge-built     { background: var(--color-accent-dim); color: var(--color-accent);  border: 1px solid rgba(88,166,255,.3); }
+        .badge-not-built { background: rgba(255,255,255,.05);   color: var(--color-muted);   border: 1px solid var(--color-border); }
+        .badge-version   { background: rgba(180,120,255,.15);   color: #b478ff;              border: 1px solid rgba(180,120,255,.35); }
+        .badge-mismatch  { background: rgba(241,76,76,.15);     color: var(--color-danger);  border: 1px solid rgba(241,76,76,.4); }
+        .badge-template-token   { background: rgba(60, 170, 255, .16); color: #6ec3ff; border: 1px solid rgba(60, 170, 255, .35); }
+        .badge-template-escrow  { background: rgba(255, 164, 66, .14); color: #ffb86a; border: 1px solid rgba(255, 164, 66, .34); }
+        .badge-template-voting  { background: rgba(100, 195, 110, .15); color: #72d67d; border: 1px solid rgba(100, 195, 110, .34); }
+        .badge-template-custom  { background: rgba(187, 134, 252, .14); color: #c59bff; border: 1px solid rgba(187, 134, 252, .36); }
+        .badge-template-unknown { background: rgba(255,255,255,.05); color: var(--color-muted); border: 1px solid var(--color-border); }
 
-.card-actions { display: flex; gap: 5px; flex-wrap: wrap; }
-.action-btn {
-    background:    var(--color-btn-bg);
-    color:         var(--color-btn-fg);
-    border:        none;
-    border-radius: 4px;
-    padding:       4px 10px;
-    font-size:     11px;
-    font-weight:   500;
-    cursor:        pointer;
-    transition:    background 0.15s;
-}
-.action-btn:hover    { background: var(--color-btn-hover); }
-.action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.action-btn.secondary {
-    background: transparent;
-    border:     1px solid var(--color-border);
-    color:      var(--color-fg);
-}
-.action-btn.secondary:hover { background: var(--color-card-hover); }
+        /* ── Dependency info ─────────────────────────────────────── */
+        .dependency-info {
+            display:      flex;
+            flex-wrap:    wrap;
+            gap:          4px;
+            margin-top:   6px;
+            margin-bottom: 8px;
+        }
+        .dep-badge {
+            background:   rgba(100, 150, 255, .12);
+            color:        #88b4ff;
+            border:       1px solid rgba(100, 150, 255, .3);
+            padding:      2px 6px;
+            border-radius: 8px;
+            white-space:  nowrap;
+            font-size:    9px;
+            font-weight:  500;
+        }
+        .dep-circular {
+            background:   rgba(241, 76, 76, .15);
+            color:        var(--color-danger);
+            border:       1px solid rgba(241, 76, 76, .4);
+            font-weight:  600;
+        }
 
-/* ── Context Menu ───────────────────────────────────────── */
-#context-menu {
-    position:      fixed;
-    background:    var(--vscode-menu-background, var(--color-card));
-    border:        1px solid var(--vscode-menu-border, var(--color-border));
-    border-radius: var(--radius);
-    box-shadow:    var(--shadow);
-    min-width:     200px;
-    max-width:     260px;
-    z-index:       1000;
-    overflow:      hidden;
-    padding:       4px 0;
-    display:       none;
-    animation:     menuIn 0.08s ease;
-}
-@keyframes menuIn {
-    from { opacity: 0; transform: scale(0.96) translateY(-4px); }
-    to   { opacity: 1; transform: scale(1)    translateY(0);    }
-}
-#context-menu.visible { display: block; }
+        .contract-meta {
+            font-size:     11px;
+            color:         var(--color-muted);
+            margin-bottom: 8px;
+            line-height:   1.5;
+        }
+        .contract-id {
+            font-family:   monospace;
+            font-size:     10px;
+            color:         var(--color-muted);
+            word-break:    break-all;
+            margin-bottom: 6px;
+            background:    rgba(255,255,255,.04);
+            padding:       3px 5px;
+            border-radius: 3px;
+        }
 
-.menu-item {
-    display:     flex;
-    align-items: center;
-    gap:         8px;
-    padding:     6px 12px;
-    cursor:      pointer;
-    font-size:   13px;
-    color:       var(--vscode-menu-foreground, var(--color-fg));
-    white-space: nowrap;
-}
-.menu-item:hover             { background: var(--vscode-menu-selectionBackground, var(--color-card-hover)); }
-.menu-item.disabled          { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
-.menu-item.destructive       { color: var(--color-danger); }
-.menu-item.destructive:hover { background: rgba(241,76,76,.12); }
-.menu-item .item-icon        { font-size: 14px; width: 16px; text-align: center; flex-shrink: 0; }
-.menu-item .item-label       { flex: 1; }
-.menu-item .item-shortcut    { font-size: 11px; color: var(--color-muted); margin-left: 8px; }
-.menu-separator              { height: 1px; background: var(--color-border); margin: 3px 0; }
+        .card-actions { display: flex; gap: 5px; flex-wrap: wrap; }
+        .action-btn {
+            background:    var(--color-btn-bg);
+            color:         var(--color-btn-fg);
+            border:        none;
+            border-radius: 4px;
+            padding:       4px 10px;
+            font-size:     11px;
+            font-weight:   500;
+            cursor:        pointer;
+            transition:    background 0.15s;
+        }
+        .action-btn:hover    { background: var(--color-btn-hover); }
+        .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .action-btn.secondary {
+            background: transparent;
+            border: 1px solid var(--color-border);
+            color: var(--color-fg);
+        }
+        .action-btn.secondary:hover { background: var(--color-card-hover); }
 
-/* ── Toast ──────────────────────────────────────────────── */
-#toast-container {
-    position:       fixed;
-    bottom:         16px;
-    left:           50%;
-    transform:      translateX(-50%);
-    z-index:        2000;
-    display:        flex;
-    flex-direction: column;
-    gap:            6px;
-    pointer-events: none;
-}
-.toast {
-    background:    var(--color-card);
-    border:        1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding:       8px 14px;
-    font-size:     12px;
-    display:       flex;
-    align-items:   center;
-    gap:           8px;
-    box-shadow:    var(--shadow);
-    animation:     toastIn 0.2s ease;
-    white-space:   nowrap;
-}
-@keyframes toastIn {
-    from { opacity: 0; transform: translateY(8px); }
-    to   { opacity: 1; transform: translateY(0);   }
-}
-.toast.success { border-left: 3px solid var(--color-success); }
-.toast.error   { border-left: 3px solid var(--color-danger);  }
-.toast.info    { border-left: 3px solid var(--color-accent);  }
+        /* ── Context Menu ───────────────────────────────────────── */
+        #context-menu {
+            position: fixed;
+            background: var(--vscode-menu-background, var(--color-card));
+            border: 1px solid var(--vscode-menu-border, var(--color-border));
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            min-width: 200px;
+            max-width: 260px;
+            z-index: 1000;
+            overflow: hidden;
+            padding: 4px 0;
+            display: none;
+            animation:     menuIn 0.08s ease;
+        }
+        @keyframes menuIn {
+            from { opacity: 0; transform: scale(0.96) translateY(-4px); }
+            to   { opacity: 1; transform: scale(1)    translateY(0); }
+        }
+        #context-menu.visible { display: block; }
 
-/* ── Import Preview Modal ──────────────────────────────────── */
-#import-modal-overlay {
-    position:   fixed;
-    inset:      0;
-    background: rgba(0,0,0,0.55);
-    z-index:    3000;
-    display:    none;
-    align-items: center;
-    justify-content: center;
-}
-#import-modal-overlay.visible { display: flex; }
+        .menu-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            cursor: pointer;
+            font-size: 13px;
+            color: var(--vscode-menu-foreground, var(--color-fg));
+            white-space: nowrap;
+        }
+        .menu-item:hover             { background: var(--vscode-menu-selectionBackground, var(--color-card-hover)); }
+        .menu-item.disabled          { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
+        .menu-item.destructive       { color: var(--color-danger); }
+        .menu-item.destructive:hover { background: rgba(241, 76, 76, .12); }
+        .menu-item .item-icon        { font-size: 14px; width: 16px; text-align: center; flex-shrink: 0; }
+        .menu-item .item-label       { flex: 1; }
+        .menu-item .item-shortcut    { font-size: 11px; color: var(--color-muted); margin-left: 8px; }
+        .menu-separator              { height: 1px; background: var(--color-border); margin: 3px 0; }
 
-#import-modal {
-    background:    var(--color-card);
-    border:        1px solid var(--color-border);
-    border-radius: 8px;
-    box-shadow:    var(--shadow);
-    width:         320px;
-    max-height:    90vh;
-    display:       flex;
-    flex-direction: column;
-    overflow:      hidden;
-    animation:     menuIn 0.12s ease;
-}
-.import-modal-header {
-    display:        flex;
-    align-items:    center;
-    justify-content: space-between;
-    padding:        10px 14px;
-    border-bottom:  1px solid var(--color-border);
-    font-weight:    700;
-    font-size:      13px;
-}
-.import-modal-body {
-    flex:       1;
-    overflow-y: auto;
-    padding:    10px 14px;
-    font-size:  12px;
-}
-.import-modal-footer {
-    display:        flex;
-    justify-content: flex-end;
-    gap:            8px;
-    padding:        10px 14px;
-    border-top:     1px solid var(--color-border);
-}
-.import-section { margin-bottom: 10px; }
-.import-section-title {
-    font-weight:    700;
-    font-size:      11px;
-    color:          var(--color-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom:  4px;
-}
-.import-item {
-    display:       flex;
-    align-items:   center;
-    gap:           6px;
-    padding:       4px 0;
-    font-size:     12px;
-}
-.import-item label { flex: 1; cursor: pointer; }
-.import-item select {
-    font-size:     11px;
-    background:    var(--color-bg);
-    color:         var(--color-fg);
-    border:        1px solid var(--color-border);
-    border-radius: 4px;
-    padding:       2px 4px;
-}
-.import-stat {
-    display:     flex;
-    justify-content: space-between;
-    padding:     2px 0;
-    color:       var(--color-muted);
-}
-.import-stat .val { color: var(--color-fg); font-weight: 600; }
-.import-error-box {
-    background:    rgba(241,76,76,.1);
-    border:        1px solid rgba(241,76,76,.4);
-    border-radius: var(--radius);
-    padding:       6px 10px;
-    font-size:     11px;
-    color:         var(--color-danger);
-    margin-bottom: 8px;
-}
-.import-warning-box {
-    background:    rgba(255,200,50,.1);
-    border:        1px solid rgba(255,200,50,.4);
-    border-radius: var(--radius);
-    padding:       6px 10px;
-    font-size:     11px;
-    color:         #d4a017;
-    margin-bottom: 8px;
-}
+        /* ── Toast ──────────────────────────────────────────────── */
+        #toast-container {
+            position: fixed;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 2000;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            pointer-events: none;
+        }
+        .toast {
+            background: var(--color-card);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            padding: 8px 14px;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: var(--shadow);
+            animation:     toastIn 0.2s ease;
+            white-space: nowrap;
+        }
+        @keyframes toastIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        .toast.success { border-left: 3px solid var(--color-success); }
+        .toast.error   { border-left: 3px solid var(--color-danger); }
+        .toast.info    { border-left: 3px solid var(--color-accent); }
 
-/* ── Version history panel ──────────────────────────────── */
-#version-panel {
-    position:      fixed;
-    top:           0; right: 0; bottom: 0;
-    width:         280px;
-    background:    var(--color-card);
-    border-left:   1px solid var(--color-border);
-    box-shadow:    var(--shadow);
-    z-index:       900;
-    display:       none;
-    flex-direction: column;
-    overflow:      hidden;
-}
-#version-panel.visible { display: flex; }
-.version-panel-header {
-    display:         flex;
-    align-items:     center;
-    justify-content: space-between;
-    padding:         10px 12px;
-    background:      var(--color-bg);
-    border-bottom:   1px solid var(--color-border);
-    font-size:       12px;
-    font-weight:     700;
-}
-.version-panel-body { flex: 1; overflow-y: auto; padding: 8px; }
-.version-entry {
-    background:    var(--color-bg);
-    border:        1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding:       7px 10px;
-    margin-bottom: 5px;
-    font-size:     11px;
-}
-.version-entry-ver  { font-weight: 700; color: var(--color-accent); margin-bottom: 2px; }
-.version-entry-meta { color: var(--color-muted); margin-bottom: 3px; }
-.version-entry-tag  { font-size: 10px; color: #b478ff; margin-bottom: 3px; }
-.version-entry.deployed { border-left: 3px solid var(--color-success); }
-.version-mismatch-banner {
-    background:    rgba(241,76,76,.1);
-    border:        1px solid rgba(241,76,76,.4);
-    border-radius: var(--radius);
-    padding:       6px 10px;
-    font-size:     11px;
-    color:         var(--color-danger);
-    margin-bottom: 8px;
-}
+        /* ── Import Preview Modal ──────────────────────────────────── */
+        #import-modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.55);
+            z-index: 3000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+        #import-modal-overlay.visible { display: flex; }
 
-/* ── Deployments ────────────────────────────────────────── */
-#deployments-list { padding: 0 8px 16px; }
-.deployment-card {
-    background:    var(--color-card);
-    border:        1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding:       8px 12px;
-    margin-bottom: 5px;
-    font-size:     12px;
-}
-.deployment-id   { font-family: monospace; font-size: 10px; color: var(--color-muted); word-break: break-all; }
-.deployment-meta { color: var(--color-muted); margin-top: 2px; }
+        #import-modal {
+            background: var(--color-card);
+            border: 1px solid var(--color-border);
+            border-radius: 8px;
+            box-shadow: var(--shadow);
+            width: 320px;
+            max-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            animation:     menuIn 0.12s ease;
+        }
+        .import-modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--color-border);
+            font-weight: 700;
+            font-size: 13px;
+        }
+        .import-modal-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 14px;
+            font-size: 12px;
+        }
+        .import-modal-footer {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+            padding: 10px 14px;
+            border-top: 1px solid var(--color-border);
+        }
+        .import-section { margin-bottom: 10px; }
+        .import-section-title {
+            font-weight: 700;
+            font-size: 11px;
+            color: var(--color-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+        .import-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 0;
+            font-size: 12px;
+        }
+        .import-item label { flex: 1; cursor: pointer; }
+        .import-item select {
+            font-size: 11px;
+            background: var(--color-bg);
+            color: var(--color-fg);
+            border: 1px solid var(--color-border);
+            border-radius: 4px;
+            padding: 2px 4px;
+        }
+        .import-stat {
+            display: flex;
+            justify-content: space-between;
+            padding: 2px 0;
+            color: var(--color-muted);
+        }
+        .import-stat .val { color: var(--color-fg); font-weight: 600; }
+        .import-error-box {
+            background: rgba(241, 76, 76, .1);
+            border: 1px solid rgba(241, 76, 76, .4);
+            border-radius: var(--radius);
+            padding: 6px 10px;
+            font-size: 11px;
+            color: var(--color-danger);
+            margin-bottom: 8px;
+        }
+        .import-warning-box {
+            background: rgba(255, 200, 50, .1);
+            border: 1px solid rgba(255, 200, 50, .4);
+            border-radius: var(--radius);
+            padding: 6px 10px;
+            font-size: 11px;
+            color: #d4a017;
+            margin-bottom: 8px;
+        }
 
-/* ── Empty state ────────────────────────────────────────── */
-.empty-state {
-    text-align:  center;
-    padding:     28px 16px;
-    color:       var(--color-muted);
-    font-size:   12px;
-    line-height: 1.6;
-}
-.empty-state .emoji { font-size: 28px; margin-bottom: 8px; }
+        /* ── Version history panel ──────────────────────────────── */
+        #version-panel {
+            position: fixed;
+            top: 0; right: 0; bottom: 0;
+            width: 280px;
+            background: var(--color-card);
+            border-left: 1px solid var(--color-border);
+            box-shadow: var(--shadow);
+            z-index: 900;
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        #version-panel.visible { display: flex; }
+        .version-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            background: var(--color-bg);
+            border-bottom: 1px solid var(--color-border);
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .version-panel-body { flex: 1; overflow-y: auto; padding: 8px; }
+        .version-entry {
+            background: var(--color-bg);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            padding: 7px 10px;
+            margin-bottom: 5px;
+            font-size: 11px;
+        }
+        .version-entry-ver  { font-weight: 700; color: var(--color-accent); margin-bottom: 2px; }
+        .version-entry-meta { color: var(--color-muted); margin-bottom: 3px; }
+        .version-entry-tag  { font-size: 10px; color: #b478ff; margin-bottom: 3px; }
+        .version-entry.deployed { border-left: 3px solid var(--color-success); }
+        .version-mismatch-banner {
+            background: rgba(241, 76, 76, .1);
+            border: 1px solid rgba(241, 76, 76, .4);
+            border-radius: var(--radius);
+            padding: 6px 10px;
+            font-size: 11px;
+            color: var(--color-danger);
+            margin-bottom: 8px;
+        }
 
-/* ── Simulation History ────────────────────────────────── */
-#sim-history-list { padding: 0 8px 16px; }
-.sim-history-stats {
-    font-size:     11px;
-    color:         var(--color-muted);
-    padding:       4px 14px 6px;
-    display:       flex;
-    gap:           10px;
-    flex-wrap:     wrap;
-}
-.sim-history-stats .stat-value { font-weight: 600; color: var(--color-fg); }
-.sim-history-card {
-    background:    var(--color-card);
-    border:        1px solid var(--color-border);
-    border-radius: var(--radius);
-    padding:       8px 12px;
-    margin-bottom: 5px;
-    font-size:     12px;
-    transition:    border-color 0.15s;
-}
-.sim-history-card:hover { border-color: var(--color-accent); }
-.sim-history-card.success { border-left: 3px solid var(--color-success); }
-.sim-history-card.failure { border-left: 3px solid var(--color-danger); }
-.sim-history-fn   { font-weight: 600; color: var(--color-accent); }
-.sim-history-meta { font-size: 10px; color: var(--color-muted); margin-top: 2px; }
-.sim-history-label { font-size: 10px; color: #b478ff; margin-top: 2px; }
-.sim-history-error { font-size: 10px; color: var(--color-danger); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-.sim-history-actions { display: flex; gap: 4px; margin-top: 5px; }
-.sim-history-filter {
-    padding:       4px 8px;
-    display:       flex;
-    gap:           4px;
-    align-items:   center;
-}
-.sim-history-filter input {
-    background:    var(--color-card);
-    border:        1px solid var(--color-border);
-    border-radius: 3px;
-    color:         var(--color-fg);
-    font-size:     11px;
-    padding:       3px 6px;
-    flex:          1;
-    outline:       none;
-    font-family:   inherit;
-}
-.sim-history-filter input:focus { border-color: var(--color-accent); }
-.sim-history-filter select {
-    background:    var(--color-card);
-    border:        1px solid var(--color-border);
-    border-radius: 3px;
-    color:         var(--color-fg);
-    font-size:     11px;
-    padding:       3px 4px;
-    outline:       none;
-    font-family:   inherit;
-}
-</style>
+        /* ── Deployments ────────────────────────────────────────── */
+        #deployments-list { padding: 0 8px 16px; }
+        .deployment-card {
+            background: var(--color-card);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            padding: 8px 12px;
+            margin-bottom: 5px;
+            font-size: 12px;
+        }
+        .deployment-id   { font-family: monospace; font-size: 10px; color: var(--color-muted); word-break: break-all; }
+        .deployment-meta { color: var(--color-muted); margin-top: 2px; }
+
+        /* ── Empty state ────────────────────────────────────────── */
+        .empty-state {
+            text-align: center;
+            padding: 28px 16px;
+            color: var(--color-muted);
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .empty-state .emoji { font-size: 28px; margin-bottom: 8px; }
+
+        /* ── Simulation History ────────────────────────────────── */
+        #sim-history-list { padding: 0 8px 16px; }
+        .sim-history-stats {
+            font-size: 11px;
+            color: var(--color-muted);
+            padding: 4px 14px 6px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .sim-history-stats .stat-value { font-weight: 600; color: var(--color-fg); }
+        .sim-history-card {
+            background: var(--color-card);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            padding: 8px 12px;
+            margin-bottom: 5px;
+            font-size: 12px;
+            transition: border-color 0.15s;
+        }
+        .sim-history-card:hover { border-color: var(--color-accent); }
+        .sim-history-card.success { border-left: 3px solid var(--color-success); }
+        .sim-history-card.failure { border-left: 3px solid var(--color-danger); }
+        .sim-history-fn   { font-weight: 600; color: var(--color-accent); }
+        .sim-history-meta { font-size: 10px; color: var(--color-muted); margin-top: 2px; }
+        .sim-history-label { font-size: 10px; color: #b478ff; margin-top: 2px; }
+        .sim-history-error { font-size: 10px; color: var(--color-danger); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+        .sim-history-actions { display: flex; gap: 4px; margin-top: 5px; }
+        .sim-history-filter {
+            padding: 4px 8px;
+            display: flex;
+            gap: 4px;
+            align-items: center;
+        }
+        .sim-history-filter input {
+            background: var(--color-card);
+            border: 1px solid var(--color-border);
+            border-radius: 3px;
+            color: var(--color-fg);
+            font-size: 11px;
+            padding: 3px 6px;
+            flex: 1;
+            outline: none;
+            font-family: inherit;
+        }
+        .sim-history-filter input:focus { border-color: var(--color-accent); }
+        .sim-history-filter select {
+            background: var(--color-card);
+            border: 1px solid var(--color-border);
+            border-radius: 3px;
+            color: var(--color-fg);
+            font-size: 11px;
+            padding: 3px 4px;
+            outline: none;
+            font-family: inherit;
+        }
+
+        /* ── CLI History ────────────────────────────────────────── */
+        #cli-history-list { padding: 0 8px 16px; }
+        .cli-history-card {
+            background: var(--color-card);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius);
+            padding: 8px 12px;
+            margin-bottom: 5px;
+            font-size: 12px;
+            transition: border-color 0.15s;
+        }
+        .cli-history-card:hover { border-color: var(--color-accent); }
+        .cli-history-card.success { border-left: 3px solid var(--color-success); }
+        .cli-history-card.failure { border-left: 3px solid var(--color-danger); }
+        .cli-history-cmd   { font-family: monospace; font-weight: 600; color: var(--color-accent); word-break: break-all; margin-bottom: 4px; }
+        .cli-history-meta { font-size: 10px; color: var(--color-muted); margin-top: 2px; }
+        .cli-history-label { font-size: 10px; color: #b478ff; margin-top: 2px; }
+        .cli-history-output {
+            font-family: monospace;
+            font-size: 9px;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 4px;
+            border-radius: 3px;
+            margin-top: 6px;
+            max-height: 60px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            border: 1px solid var(--color-border);
+        }
+        .cli-history-actions { display: flex; gap: 4px; margin-top: 6px; }
+
+        /* ── Filter Bar (Shared) ────────────────────────────────── */
+        .filter-bar {
+            padding:       4px 8px 8px 8px;
+            display:       flex;
+            gap:           4px;
+            align-items:   center;
+            flex-wrap:     wrap;
+        }
+        .filter-bar input.filter-search {
+            background:    var(--color-card);
+            border:        1px solid var(--color-border);
+            border-radius: 3px;
+            color:         var(--color-fg);
+            font-size:     11px;
+            padding:       4px 6px;
+            flex:          1;
+            min-width:     120px;
+            outline:       none;
+            font-family:   inherit;
+        }
+        .filter-bar input.filter-search:focus { border-color: var(--color-accent); }
+        .filter-bar select.filter-select {
+            background:    var(--color-card);
+            border:        1px solid var(--color-border);
+            border-radius: 3px;
+            color:         var(--color-fg);
+            font-size:     11px;
+            padding:       3px 4px;
+            outline:       none;
+            font-family:   inherit;
+        }
+        .contract-name mark {
+            background-color: var(--color-accent-dim);
+            color: var(--color-accent);
+            border-radius: 2px;
+        }
+    </style>
 </head>
 <body>
 
@@ -1350,17 +1568,43 @@ body {
 <div class="header">
     <h1>Stellar Suite</h1>
     <div class="header-actions">
-        <button class="icon-btn" id="export-btn"      title="Export contracts">📤 Export</button>
-        <button class="icon-btn" id="import-btn"      title="Import contracts">📥 Import</button>
+        <button class="icon-btn" id="export-btn" title="Export contracts">📤 Export</button>
+        <button class="icon-btn" id="import-btn" title="Import contracts">📥 Import</button>
         <button class="icon-btn" id="reset-order-btn" title="Reset contract order to default">↺ Reset order</button>
-        <button class="icon-btn" id="refresh-btn"     title="Refresh contracts">↻ Refresh</button>
+        <button class="icon-btn" id="refresh-btn" title="Refresh contracts">↻ Refresh</button>
     </div>
 </div>
 
 <!-- ── Contracts section ─────────────────────────────────── -->
-<div class="section-label">Contracts</div>
-<div id="contracts-list">
-    <div class="empty-state"><div class="emoji">🔍</div>Scanning for contracts…</div>
+<div class="section-label" style="display:flex;align-items:center;justify-content:space-between;padding-right:14px">
+    Contracts
+    <span style="display:flex;gap:4px">
+        <button class="icon-btn" id="contract-filter-reset-btn" title="Reset all filters" style="font-size:11px;padding:2px 5px;display:none;">✕ Reset</button>
+    </span>
+</div>
+
+<div class="filter-bar" id="contract-filter-bar">
+    <input type="text" id="contract-search" class="filter-search" placeholder="Search contracts…" />
+    <select id="contract-build-filter" class="filter-select" title="Build Status">
+        <option value="">Any Build</option>
+        <option value="built">Built</option>
+        <option value="not-built">Not Built</option>
+    </select>
+    <select id="contract-deploy-filter" class="filter-select" title="Deploy Status">
+        <option value="">Any Status</option>
+        <option value="deployed">Deployed</option>
+        <option value="not-deployed">Not Deployed</option>
+    </select>
+    <select id="contract-template-filter" class="filter-select" title="Template Type">
+        <option value="">Any Template</option>
+    </select>
+</div>
+
+<div id="contracts-list" role="listbox" aria-label="Contract list">
+    <div class="empty-state">
+        <div class="emoji">🔍</div>
+        Scanning for contracts…
+    </div>
 </div>
 
 <!-- ── Deployments section ───────────────────────────────── -->
@@ -1369,13 +1613,26 @@ body {
     <div class="empty-state" style="padding:12px 16px">No deployments recorded.</div>
 </div>
 
+<!-- ── CLI History section ──────────────────────── -->
+<div class="section-label" style="display:flex;align-items:center;justify-content:space-between;padding-right:14px">
+    CLI History
+    <span style="display:flex;gap:4px">
+        <button class="icon-btn" id="cli-history-load-btn" title="Refresh history" style="font-size:11px;padding:2px 5px">↻</button>
+        <button class="icon-btn" id="cli-history-export-btn" title="Export history" style="font-size:11px;padding:2px 5px">⤓</button>
+        <button class="icon-btn" id="cli-history-clear-btn" title="Clear history" style="font-size:11px;padding:2px 5px;color:var(--color-danger)">✕</button>
+    </span>
+</div>
+<div id="cli-history-list">
+    <div class="empty-state" style="padding:12px 16px">No history records found.</div>
+</div>
+
 <!-- ── Simulation History section ──────────────────────── -->
 <div class="section-label" style="display:flex;align-items:center;justify-content:space-between;padding-right:14px">
     Simulations
     <span style="display:flex;gap:4px">
-        <button class="icon-btn" id="sim-history-load-btn" title="Load simulation history" style="font-size:11px;padding:2px 5px">↻</button>
-        <button class="icon-btn" id="sim-history-export-btn" title="Export simulation history" style="font-size:11px;padding:2px 5px">⤓</button>
-        <button class="icon-btn" id="sim-history-clear-btn" title="Clear simulation history" style="font-size:11px;padding:2px 5px;color:var(--color-danger)">✕</button>
+        <button class="icon-btn" id="sim-history-load-btn" title="Refresh simulations" style="font-size:11px;padding:2px 5px">↻</button>
+        <button class="icon-btn" id="sim-history-export-btn" title="Export simulations" style="font-size:11px;padding:2px 5px">⤓</button>
+        <button class="icon-btn" id="sim-history-clear-btn" title="Clear simulations" style="font-size:11px;padding:2px 5px;color:var(--color-danger)">✕</button>
     </span>
 </div>
 <div class="sim-history-filter" id="sim-history-filter">
@@ -1421,19 +1678,33 @@ body {
     </div>
 </div>
 
+<div id="keyboard-announce" class="sr-only" role="status" aria-live="polite"></div>
+
 <script>
 const vscode = acquireVsCodeApi();
 
 // ── State ─────────────────────────────────────────────────────
-let _contracts          = [];
-let _versionStates      = [];
+let _contracts = [];
+let _versionStates = [];
 let _activeMenuContract = null;
-let _dragPath           = null;
-let _dragEl             = null;
-let _dropTargetEl       = null;
+let _dragPath = null;
+let _dragEl = null;
+let _dropTargetEl = null;
+
+// ── Keyboard navigation state ─────────────────────────────────
+let _focusedContractIndex = -1;
+let _showShortcutHints    = true;
+// Filter preferences
+const _savedState = vscode.getState() || {};
+let _filters = _savedState.filters || {
+    search: '',
+    build: '',
+    deploy: '',
+    template: ''
+};
 
 // ── Import state ──────────────────────────────────────────────
-let _importPreview   = null;
+let _importPreview = null;
 let _importValidation = null;
 
 // ── Message receiver ──────────────────────────────────────────
@@ -1443,7 +1714,8 @@ window.addEventListener('message', (event) => {
         case 'update':
             _contracts     = msg.contracts     || [];
             _versionStates = msg.versionStates  || [];
-            renderContracts(_contracts);
+            updateTemplateDropdown();
+            renderFilteredContracts();
             renderDeployments(msg.deployments || []);
             renderVersionMismatches(_versionStates);
             break;
@@ -1459,10 +1731,21 @@ window.addEventListener('message', (event) => {
         case 'simHistory:data':
             renderSimulationHistory(msg.entries || [], msg.stats || {});
             break;
+        case 'cliHistory:data':
+            renderCliHistory(msg.entries || []);
+            break;
         case 'import:preview':
             _importValidation = msg.validation;
-            _importPreview    = msg.validation.preview;
+            _importPreview = msg.validation.preview;
             showImportPreviewModal(msg.validation);
+            break;
+        case 'settings:update':
+            if (msg.showShortcutHints !== undefined) {
+                _showShortcutHints = !!msg.showShortcutHints;
+                document.querySelectorAll('.shortcut-hints').forEach(el => {
+                    el.classList.toggle('visible', _showShortcutHints);
+                });
+            }
             break;
     }
 });
@@ -1586,12 +1869,172 @@ function applyImportSelection() {
     hideImportModal();
 }
 
+// ── Keyboard navigation helpers ───────────────────────────────
+
+function announce(text) {
+    const el = document.getElementById('keyboard-announce');
+    if (el) { el.textContent = text; }
+}
+
+function getContractCards() {
+    return [...document.querySelectorAll('#contracts-list .contract-card')];
+}
+
+function focusContract(index) {
+    const cards = getContractCards();
+    if (cards.length === 0) { return; }
+    index = Math.max(0, Math.min(index, cards.length - 1));
+    cards.forEach(c => c.setAttribute('aria-selected', 'false'));
+    _focusedContractIndex = index;
+    const card = cards[index];
+    card.setAttribute('aria-selected', 'true');
+    card.focus();
+    card.scrollIntoView({ block: 'nearest' });
+    announce(card.getAttribute('aria-label') || card.dataset.name || '');
+}
+
+function getFocusedCard() {
+    const cards = getContractCards();
+    if (_focusedContractIndex >= 0 && _focusedContractIndex < cards.length) {
+        return cards[_focusedContractIndex];
+    }
+    return null;
+}
+
+function cardToContract(card) {
+    if (!card) { return null; }
+    return {
+        contractName: card.dataset.name,
+        contractPath: card.dataset.path,
+        contractId:   card.dataset.contractId || undefined,
+        isBuilt:      card.dataset.isBuilt === 'true',
+        templateId:   card.dataset.templateId || undefined,
+        templateCategory: card.dataset.templateCategory || undefined,
+    };
+}
+
 // ── Keyboard ──────────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
+    const tag = (e.target && e.target.tagName) || '';
+
     if (e.key === 'Escape') {
-        if (_dragPath) { cancelDrag(); } else { hideContextMenu(); }
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') {
+            e.target.blur();
+            return;
+        }
+        const importModal = document.getElementById('import-modal-overlay');
+        if (importModal && importModal.classList.contains('visible')) {
+            hideImportModal();
+            return;
+        }
+        const menu = document.getElementById('context-menu');
+        if (menu && menu.classList.contains('visible')) {
+            hideContextMenu();
+            return;
+        }
+        if (_dragPath) {
+            cancelDrag();
+            return;
+        }
+        if (_focusedContractIndex >= 0) {
+            const cards = getContractCards();
+            cards.forEach(c => c.setAttribute('aria-selected', 'false'));
+            _focusedContractIndex = -1;
+            document.activeElement?.blur();
+            announce('');
+            return;
+        }
+        return;
     }
-    if (e.key === 'F2' && _activeMenuContract) { invokeAction('rename'); }
+
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') { return; }
+
+    const menuVisible = document.getElementById('context-menu')?.classList.contains('visible');
+    const modalVisible = document.getElementById('import-modal-overlay')?.classList.contains('visible');
+
+    if (e.key === '/' || (e.ctrlKey && e.key === 'f') || (e.metaKey && e.key === 'f')) {
+        if (!menuVisible && !modalVisible) {
+            e.preventDefault();
+            const searchInput = document.getElementById('sim-history-search');
+            if (searchInput) { searchInput.focus(); }
+            return;
+        }
+    }
+
+    if (menuVisible || modalVisible) { return; }
+
+    const cards = getContractCards();
+    const hasModifier = e.ctrlKey || e.metaKey || e.altKey;
+
+    if (e.key === 'ArrowDown' || (!hasModifier && e.key === 'j')) {
+        e.preventDefault();
+        if (_focusedContractIndex < 0) { focusContract(0); }
+        else { focusContract(_focusedContractIndex + 1); }
+        return;
+    }
+    if (e.key === 'ArrowUp' || (!hasModifier && e.key === 'k')) {
+        e.preventDefault();
+        if (_focusedContractIndex < 0) { focusContract(cards.length - 1); }
+        else { focusContract(_focusedContractIndex - 1); }
+        return;
+    }
+    if (e.key === 'Home') {
+        e.preventDefault();
+        focusContract(0);
+        return;
+    }
+    if (e.key === 'End') {
+        e.preventDefault();
+        focusContract(cards.length - 1);
+        return;
+    }
+
+    const focused = getFocusedCard();
+    if (!focused) { return; }
+
+    if (e.key === 'Enter' || e.key === ' ' || (e.shiftKey && e.key === 'F10')) {
+        e.preventDefault();
+        const contract = cardToContract(focused);
+        if (contract) {
+            _activeMenuContract = contract;
+            const rect = focused.getBoundingClientRect();
+            vscode.postMessage({
+                type: 'contextMenu:open',
+                ...contract,
+                x: rect.left + 20,
+                y: rect.bottom,
+            });
+        }
+        return;
+    }
+
+    if (e.key === 'F2') {
+        e.preventDefault();
+        _activeMenuContract = cardToContract(focused);
+        invokeAction('rename');
+        return;
+    }
+
+    if (e.key === 'Delete') {
+        e.preventDefault();
+        _activeMenuContract = cardToContract(focused);
+        invokeAction('delete');
+        return;
+    }
+
+    if (!hasModifier && !e.shiftKey) {
+        const letter = e.key.toUpperCase();
+        if (letter === 'B') { e.preventDefault(); sendAction('build', focused); return; }
+        if (letter === 'D') { e.preventDefault(); sendAction('deploy', focused); return; }
+        if (letter === 'S') { e.preventDefault(); sendAction('simulate', focused); return; }
+        if (letter === 'I') { e.preventDefault(); sendAction('inspect', focused); return; }
+        if (letter === 'P') {
+            e.preventDefault();
+            _activeMenuContract = cardToContract(focused);
+            invokeAction('pinContract');
+            return;
+        }
+    }
 });
 
 document.addEventListener('click', (e) => {
@@ -1618,9 +2061,126 @@ function templateActionTitle(contract) {
     return 'Open template-specific actions';
 }
 
-function renderContracts(contracts) {
+function highlightMatch(text, query) {
+    if (!query) return esc(text);
+    const textLower = text.toLowerCase();
+    const queryLower = query.toLowerCase();
+    const idx = textLower.indexOf(queryLower);
+    if (idx === -1) return esc(text);
+
+    const before = text.substring(0, idx);
+    const match = text.substring(idx, idx + query.length);
+    const after = text.substring(idx + query.length);
+
+    return \`\${esc(before)}<mark>\${esc(match)}</mark>\${esc(after)}\`;
+}
+
+function updateTemplateDropdown() {
+    const filterEl = document.getElementById('contract-template-filter');
+    const prevValue = filterEl.value;
+
+    const categories = new Set(_contracts.map(c => c.templateCategory || 'unknown'));
+    const sorted = Array.from(categories).sort();
+
+    let html = '<option value="">Any Template</option>';
+    for (const cat of sorted) {
+        const catStr = String(cat);
+        const name = catStr.charAt(0).toUpperCase() + catStr.slice(1);
+        html += \`<option value="\${esc(catStr)}">\${esc(name)}</option>\`;
+    }
+
+    filterEl.innerHTML = html;
+    if (categories.has(prevValue)) {
+        filterEl.value = prevValue;
+    } else {
+        filterEl.value = '';
+        _filters.template = '';
+        saveFilters();
+    }
+}
+
+function saveFilters() {
+    vscode.setState({ ...vscode.getState(), filters: _filters });
+}
+
+function applyContractFiltersAndSearch() {
+    return _contracts.filter(c => {
+        if (_filters.build === 'built' && !c.isBuilt) return false;
+        if (_filters.build === 'not-built' && c.isBuilt) return false;
+        if (_filters.deploy === 'deployed' && !c.contractId) return false;
+        if (_filters.deploy === 'not-deployed' && c.contractId) return false;
+        if (_filters.template && (c.templateCategory || 'unknown') !== _filters.template) return false;
+        if (_filters.search) {
+            const query = _filters.search.toLowerCase();
+            if (!c.name.toLowerCase().includes(query)) return false;
+        }
+        return true;
+    });
+}
+
+function initFilters() {
+    const searchInp = document.getElementById('contract-search');
+    const buildSel = document.getElementById('contract-build-filter');
+    const deploySel = document.getElementById('contract-deploy-filter');
+    const templateSel = document.getElementById('contract-template-filter');
+    const resetBtn = document.getElementById('contract-filter-reset-btn');
+
+    if (searchInp) searchInp.value = _filters.search || '';
+    if (buildSel) buildSel.value = _filters.build || '';
+    if (deploySel) deploySel.value = _filters.deploy || '';
+    if (templateSel) templateSel.value = _filters.template || '';
+
+    const updateResetBtn = () => {
+        const active = _filters.search || _filters.build || _filters.deploy || _filters.template;
+        if (resetBtn) resetBtn.style.display = active ? 'block' : 'none';
+        saveFilters();
+        renderFilteredContracts();
+    };
+
+    let debounceTimer;
+    searchInp?.addEventListener('input', (e) => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            _filters.search = e.target.value.trim();
+            updateResetBtn();
+        }, 200);
+    });
+
+    buildSel?.addEventListener('change', (e) => {
+        _filters.build = e.target.value;
+        updateResetBtn();
+    });
+
+    deploySel?.addEventListener('change', (e) => {
+        _filters.deploy = e.target.value;
+        updateResetBtn();
+    });
+
+    templateSel?.addEventListener('change', (e) => {
+        _filters.template = e.target.value;
+        updateResetBtn();
+    });
+
+    resetBtn?.addEventListener('click', () => {
+        _filters = { search: '', build: '', deploy: '', template: '' };
+        searchInp.value = '';
+        buildSel.value = '';
+        deploySel.value = '';
+        templateSel.value = '';
+        updateResetBtn();
+    });
+
+    updateResetBtn();
+}
+
+function renderFilteredContracts() {
+    const filtered = applyContractFiltersAndSearch();
+    renderContracts(filtered, _contracts.length);
+}
+
+function renderContracts(contracts, totalCount = contracts.length) {
     const el = document.getElementById('contracts-list');
-    if (!contracts.length) {
+    if (!totalCount) {
         el.innerHTML = \`<div class="empty-state">
             <div class="emoji">📂</div>
             No Soroban contracts detected.<br>
@@ -1629,8 +2189,24 @@ function renderContracts(contracts) {
         return;
     }
 
-    el.innerHTML = contracts.map((c, idx) => \`
+    if (totalCount > 0 && contracts.length === 0) {
+        el.innerHTML = \`<div class="empty-state">
+            <div class="emoji">🔍</div>
+            No contracts match active filters.
+        </div>\`;
+        return;
+    }
+
+    el.innerHTML = contracts.map((c, idx) => {
+        const builtLabel = c.isBuilt ? 'built' : 'not built';
+        const deployLabel = c.contractId ? 'deployed' : 'not deployed';
+        const ariaLabel = esc(c.name) + ', ' + builtLabel + ', ' + deployLabel;
+        return \`
         <div class="contract-card\${c.isPinned ? ' pinned' : ''}"
+             tabindex="0"
+             role="option"
+             aria-selected="false"
+             aria-label="\${ariaLabel}"
              draggable="\${!c.isPinned}"
              data-path="\${esc(c.path)}"
              data-name="\${esc(c.name)}"
@@ -1649,7 +2225,7 @@ function renderContracts(contracts) {
 
             <div class="card-header">
                 <span class="drag-handle" aria-hidden="true">\${c.isPinned ? '📌' : '⠿'}</span>
-                <span class="contract-name">\${esc(c.name)}</span>
+                <span class="contract-name">\${highlightMatch(c.name, _filters.search)}</span>
                 \${c.contractId ? '<span class="badge badge-deployed">Deployed</span>' : ''}
                 \${c.isBuilt
                     ? '<span class="badge badge-built">Built</span>'
@@ -1664,7 +2240,7 @@ function renderContracts(contracts) {
             <div class="contract-meta">Template: <strong>\${esc(c.templateDisplayName || 'Unknown')}</strong> · \${esc(c.templateSource || 'unknown')}</div>
             \${c.deployedVersion ? \`<div class="contract-meta" style="font-size:10px">Deployed version: <strong>v\${esc(c.deployedVersion)}</strong></div>\` : ''}
             \${c.hasVersionMismatch ? \`<div class="contract-meta" style="color:var(--color-danger);font-size:10px">⚠ \${esc(c.versionMismatchMessage || 'Version mismatch')}</div>\` : ''}
-            
+
             \${c.dependencyCount !== undefined || c.dependentCount !== undefined ? \`
                 <div class="dependency-info">
                     \${c.dependencyCount > 0 ? \`<span class="dep-badge" title="Dependencies">📦 \${c.dependencyCount} dep\${c.dependencyCount !== 1 ? 's' : ''}</span>\` : ''}
@@ -1694,9 +2270,31 @@ function renderContracts(contracts) {
                         \${(!c.templateCategory || c.templateCategory === 'unknown') ? 'disabled' : ''}
                         title="\${templateActionTitle(c)}">Template</button>
             </div>
+            <div class="shortcut-hints\${_showShortcutHints ? ' visible' : ''}">
+                <span class="shortcut-hint"><kbd>Enter</kbd> Menu</span>
+                <span class="shortcut-hint"><kbd>B</kbd> Build</span>
+                \${c.contractId ? '<span class="shortcut-hint"><kbd>S</kbd> Simulate</span>' : ''}
+                \${c.contractId ? '<span class="shortcut-hint"><kbd>I</kbd> Inspect</span>' : ''}
+                <span class="shortcut-hint"><kbd>P</kbd> Pin</span>
+                <span class="shortcut-hint"><kbd>Del</kbd> Remove</span>
+            </div>
         </div>
-    \`).join('');
+    \`}).join('');
+
+    if (_focusedContractIndex >= 0) {
+        const cards = getContractCards();
+        if (cards.length > 0) {
+            const idx = Math.min(_focusedContractIndex, cards.length - 1);
+            _focusedContractIndex = idx;
+            cards[idx].setAttribute('aria-selected', 'true');
+            cards[idx].focus();
+        } else {
+            _focusedContractIndex = -1;
+        }
+    }
 }
+
+setTimeout(initFilters, 0);
 
 function sendAction(actionId, card) {
     vscode.postMessage({
@@ -1794,7 +2392,7 @@ function reorderLocally(fromPath, toPath) {
     const [moved] = updated.splice(fromIdx, 1);
     updated.splice(toIdx, 0, moved);
     _contracts = updated;
-    renderContracts(_contracts);
+    renderFilteredContracts();
 }
 
 // ── Context menu ──────────────────────────────────────────────
@@ -1877,6 +2475,7 @@ function showToast(feedback) {
         setTimeout(() => toast.remove(), 320);
     }, 3500);
 }
+
 // ── Version mismatches banner ────────────────────────────────
 
 function renderVersionMismatches(states) {
@@ -1909,14 +2508,13 @@ function displayVersionHistory(contractPath, history) {
     const body      = document.getElementById('version-panel-body');
     const titleEl   = document.getElementById('version-panel-title');
 
-    // Find contract name
     const contract  = _contracts.find(c => c.path === contractPath);
     titleEl.textContent = \`Version History — \${contract ? contract.name : contractPath}\`;
 
     if (!history.length) {
         body.innerHTML = '<div class="empty-state" style="padding:16px">No version history recorded.</div>';
     } else {
-        const entries = [...history].reverse(); // newest first
+        const entries = [...history].reverse();
         body.innerHTML = entries.map(e => \`
             <div class="version-entry\${e.isDeployed ? ' deployed' : ''}">
                 <div class="version-entry-ver">v\${esc(e.version)}\${e.isDeployed ? ' 🚀' : ''}</div>
@@ -1939,7 +2537,6 @@ function promptTagVersion(contractPath, entryId) {
     const label = prompt('Enter a label for this version (e.g. "Initial release", "Bug-fix"):');
     if (!label || !label.trim()) { return; }
     vscode.postMessage({ type: 'version:tag', contractPath, entryId, label: label.trim() });
-    // Re-fetch history to reflect tag
     setTimeout(() => vscode.postMessage({ type: 'version:getHistory', contractPath }), 300);
 }
 
@@ -1963,6 +2560,72 @@ document.getElementById('sim-history-search').addEventListener('input', (e) => {
 document.getElementById('sim-history-outcome-filter').addEventListener('change', () => {
     loadSimulationHistory();
 });
+
+// ── CLI history ───────────────────────────────────────────────
+
+document.getElementById('cli-history-load-btn').addEventListener('click', () => {
+    vscode.postMessage({ type: 'cliHistory:getAll' });
+});
+document.getElementById('cli-history-export-btn').addEventListener('click', () => {
+    vscode.postMessage({ type: 'cliHistory:export' });
+});
+document.getElementById('cli-history-clear-btn').addEventListener('click', () => {
+    vscode.postMessage({ type: 'cliHistory:clear' });
+});
+
+function renderCliHistory(entries) {
+    var listEl = document.getElementById('cli-history-list');
+    if (!entries.length) {
+        listEl.innerHTML = '<div class="empty-state" style="padding:12px 16px">No CLI history found.</div>';
+        return;
+    }
+
+    listEl.innerHTML = entries.map(function(e) {
+        var icon = e.outcome === 'success' ? '✓' : '✕';
+        var duration = e.durationMs ? ' · ' + e.durationMs + 'ms' : '';
+        var command = e.args && e.args.length > 0 ? e.command + ' ' + e.args.join(' ') : e.command;
+
+        var html = '<div class="cli-history-card ' + esc(e.outcome) + '" data-entry-id="' + esc(e.id) + '">';
+        html += '<div class="cli-history-cmd">' + icon + ' ' + esc(command) + '</div>';
+        html += '<div class="cli-history-meta">' + esc(e.source || 'manual') + ' · ' + new Date(e.timestamp).toLocaleString() + duration + '</div>';
+
+        if (e.label) {
+            html += '<div class="cli-history-label">🏷 ' + esc(e.label) + '</div>';
+        }
+
+        if (e.outcome === 'failure' && e.stderr) {
+            html += '<div class="cli-history-output">' + esc(e.stderr) + '</div>';
+        } else if (e.stdout) {
+            html += '<div class="cli-history-output">' + esc(e.stdout) + '</div>';
+        }
+
+        html += '<div class="cli-history-actions">';
+        html += '<button class="action-btn" style="font-size:10px;padding:2px 7px" onclick="replayCliCommand(\'' + esc(e.id) + '\')">Replay</button>';
+        html += '<button class="action-btn secondary" style="font-size:10px;padding:2px 7px" onclick="modifyCliCommand(\'' + esc(e.id) + '\')">Modify</button>';
+        html += '<button class="action-btn secondary" style="font-size:10px;padding:2px 7px" onclick="promptLabelCli(\'' + esc(e.id) + '\')">Label</button>';
+        html += '<button class="action-btn secondary" style="font-size:10px;padding:2px 7px;color:var(--color-danger)" onclick="deleteCliEntry(\'' + esc(e.id) + '\')">Delete</button>';
+        html += '</div></div>';
+        return html;
+    }).join('');
+}
+
+function replayCliCommand(entryId) {
+    vscode.postMessage({ type: 'cliHistory:replay', entryId });
+}
+
+function modifyCliCommand(entryId) {
+    vscode.postMessage({ type: 'cliHistory:modify', entryId });
+}
+
+function promptLabelCli(entryId) {
+    const label = prompt('Enter a label for this CLI command:');
+    if (!label || !label.trim()) { return; }
+    vscode.postMessage({ type: 'cliHistory:label', entryId, label: label.trim() });
+}
+
+function deleteCliEntry(entryId) {
+    vscode.postMessage({ type: 'cliHistory:delete', entryId });
+}
 
 function loadSimulationHistory() {
     const searchText = document.getElementById('sim-history-search').value.trim();
@@ -1993,14 +2656,14 @@ function renderSimulationHistory(entries, stats) {
     }
 
     listEl.innerHTML = entries.map(function(e) {
-        var icon     = e.outcome === 'success' ? '\u2713' : '\u2717';
-        var shortId  = e.contractId.length > 12 ? e.contractId.slice(0, 8) + '\u2026' + e.contractId.slice(-4) : e.contractId;
-        var duration = e.durationMs !== undefined ? ' \u00b7 ' + e.durationMs + 'ms' : '';
+        var icon     = e.outcome === 'success' ? '✓' : '✗';
+        var shortId  = e.contractId.length > 12 ? e.contractId.slice(0, 8) + '…' + e.contractId.slice(-4) : e.contractId;
+        var duration = e.durationMs !== undefined ? ' · ' + e.durationMs + 'ms' : '';
         var html = '<div class="sim-history-card ' + esc(e.outcome) + '" data-entry-id="' + esc(e.id) + '">';
         html += '<div class="sim-history-fn">' + icon + ' ' + esc(e.functionName) + '()</div>';
-        html += '<div class="sim-history-meta">' + esc(shortId) + ' \u00b7 ' + esc(e.network) + ' \u00b7 ' + esc(e.method) + duration + '</div>';
+        html += '<div class="sim-history-meta">' + esc(shortId) + ' · ' + esc(e.network) + ' · ' + esc(e.method) + duration + '</div>';
         html += '<div class="sim-history-meta">' + new Date(e.timestamp).toLocaleString() + '</div>';
-        if (e.label) { html += '<div class="sim-history-label">\ud83c\udff7 ' + esc(e.label) + '</div>'; }
+        if (e.label) { html += '<div class="sim-history-label">🏷 ' + esc(e.label) + '</div>'; }
         if (e.outcome === 'failure' && e.error) { html += '<div class="sim-history-error" title="' + esc(e.error) + '">' + esc(e.error) + '</div>'; }
         html += '<div class="sim-history-actions">';
         html += '<button class="action-btn secondary" style="font-size:10px;padding:2px 7px" onclick="promptLabelSimulation(\'' + esc(e.id) + '\')">Label</button>';
