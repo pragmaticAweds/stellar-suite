@@ -12,6 +12,7 @@ import {
     validateEnvVariableProfile,
 } from '../services/envVariableService';
 import { EnvVariable, EnvVariableProfile, ENV_VAR_NAME_PATTERN } from '../types/envVariable';
+import { InputSanitizationService } from '../services/inputSanitizationService';
 
 const { Buffer } = require('buffer');
 
@@ -57,6 +58,7 @@ function formatVariableList(
 async function promptVariables(
     existing: EnvVariable[] = [],
 ): Promise<EnvVariable[] | undefined> {
+    const sanitizer = new InputSanitizationService();
     const variables: EnvVariable[] = [...existing];
 
     // eslint-disable-next-line no-constant-condition
@@ -94,27 +96,41 @@ async function promptVariables(
         }
 
         if (pick.label === '$(add) Add Variable') {
-            const name = await vscode.window.showInputBox({
+            const rawName = await vscode.window.showInputBox({
                 title: 'Variable Name',
                 prompt: 'Enter the environment variable name (e.g., MY_API_KEY)',
                 validateInput: (value: string) => {
                     if (!value.trim()) { return 'Name is required.'; }
-                    if (!ENV_VAR_NAME_PATTERN.test(value.trim())) {
+                    const nameResult = sanitizer.sanitizeEnvVarName(value, { field: 'name' });
+                    if (!nameResult.valid) { return nameResult.errors[0]; }
+                    if (!ENV_VAR_NAME_PATTERN.test(nameResult.sanitizedValue)) {
                         return 'Invalid name. Use letters, digits, or underscores (must start with letter or underscore).';
                     }
-                    if (variables.some(v => v.name === value.trim())) {
+                    if (variables.some(v => v.name === nameResult.sanitizedValue)) {
                         return 'A variable with this name already exists.';
                     }
                     return undefined;
                 },
             });
-            if (!name) { continue; }
+            if (!rawName) { continue; }
 
-            const value = await vscode.window.showInputBox({
-                title: `Value for ${name.trim()}`,
+            const nameResult = sanitizer.sanitizeEnvVarName(rawName, { field: 'name' });
+            if (!nameResult.valid) { continue; }
+            const sanitizedName = nameResult.sanitizedValue;
+
+            const rawValue = await vscode.window.showInputBox({
+                title: `Value for ${sanitizedName}`,
                 prompt: 'Enter the variable value',
+                validateInput: (v: string) => {
+                    const r = sanitizer.sanitizeEnvVarValue(v, { field: 'value' });
+                    // Warnings are non-blocking; only hard errors prevent submission
+                    return r.valid ? undefined : r.errors[0];
+                },
             });
-            if (value === undefined) { continue; }
+            if (rawValue === undefined) { continue; }
+
+            const valueResult = sanitizer.sanitizeEnvVarValue(rawValue, { field: 'value' });
+            const sanitizedValue = valueResult.sanitizedValue;
 
             const sensitive = await vscode.window.showQuickPick(
                 [
@@ -126,8 +142,8 @@ async function promptVariables(
             if (!sensitive) { continue; }
 
             variables.push({
-                name: name.trim(),
-                value,
+                name: sanitizedName,
+                value: sanitizedValue,
                 sensitive: sensitive.label === 'Yes',
             });
         } else {
@@ -149,13 +165,18 @@ async function promptVariables(
             if (action.label === '$(trash) Remove') {
                 variables.splice(varIndex, 1);
             } else {
-                const newValue = await vscode.window.showInputBox({
+                const rawNewValue = await vscode.window.showInputBox({
                     title: `New value for ${varName}`,
                     prompt: 'Enter the new value',
                     value: variables[varIndex].sensitive ? '' : variables[varIndex].value,
+                    validateInput: (v: string) => {
+                        const r = sanitizer.sanitizeEnvVarValue(v, { field: 'value' });
+                        return r.valid ? undefined : r.errors[0];
+                    },
                 });
-                if (newValue === undefined) { continue; }
-                variables[varIndex] = { ...variables[varIndex], value: newValue };
+                if (rawNewValue === undefined) { continue; }
+                const newValueResult = sanitizer.sanitizeEnvVarValue(rawNewValue, { field: 'value' });
+                variables[varIndex] = { ...variables[varIndex], value: newValueResult.sanitizedValue };
             }
         }
     }

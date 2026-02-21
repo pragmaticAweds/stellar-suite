@@ -10,8 +10,10 @@ import { formatError } from '../utils/errorFormatter';
 import { resolveCliConfigurationForCommand } from '../services/cliConfigurationVscode';
 import { SimulationValidationService } from '../services/simulationValidationService';
 import { ContractWorkspaceStateService } from '../services/contractWorkStateService';
+import { InputSanitizationService } from '../services/inputSanitizationService';
 
 export async function simulateTransaction(context: vscode.ExtensionContext, sidebarProvider?: SidebarViewProvider) {
+    const sanitizer = new InputSanitizationService();
     try {
         const resolvedCliConfig = await resolveCliConfigurationForCommand(context);
         if (!resolvedCliConfig.validation.valid) {
@@ -27,9 +29,9 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
         const network = resolvedCliConfig.configuration.network;
         const rpcUrl = resolvedCliConfig.configuration.rpcUrl;
         
-        const workspaceStateService = new ContractWorkspaceStateService(context, vscode.workspace);
+        const workspaceStateService = new ContractWorkspaceStateService(context, { appendLine: () => {} });
         await workspaceStateService.initialize();
-        const lastContractId = workspaceStateService.getLastContractId();
+        const lastContractId = context.workspaceState.get<string>('stellarSuite.lastContractId') ?? '';
 
         let defaultContractId = lastContractId || '';
         try {
@@ -42,37 +44,55 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
         } catch (error) {
         }
 
-        const contractId = await vscode.window.showInputBox({
+        const rawContractId = await vscode.window.showInputBox({
             prompt: 'Enter the contract ID (address)',
             placeHolder: defaultContractId || 'e.g., C...',
             value: defaultContractId,
             validateInput: (value: string) => {
-                if (!value || value.trim().length === 0) {
-                    return 'Contract ID is required';
+                const result = sanitizer.sanitizeContractId(value, { field: 'contractId' });
+                if (!result.valid) {
+                    return result.errors[0];
                 }
-                // Basic validation for Stellar contract ID format
-                if (!value.match(/^C[A-Z0-9]{55}$/)) {
-                    return 'Invalid contract ID format (should start with C and be 56 characters)';
+                return null;
+            }
+        });
+
+        if (rawContractId === undefined) {
+            return; // User cancelled
+        }
+
+        const contractIdResult = sanitizer.sanitizeContractId(rawContractId, { field: 'contractId' });
+        if (!contractIdResult.valid) {
+            vscode.window.showErrorMessage(`Invalid contract ID: ${contractIdResult.errors[0]}`);
+            return;
+        }
+        const contractId = contractIdResult.sanitizedValue;
+
+        await context.workspaceState.update('stellarSuite.lastContractId', contractId);
+
+        // Get the function name to call
+        const rawFunctionName = await vscode.window.showInputBox({
+            prompt: 'Enter the function name to simulate',
+            placeHolder: 'e.g., transfer',
+            validateInput: (value: string) => {
+                const result = sanitizer.sanitizeFunctionName(value, { field: 'functionName' });
+                if (!result.valid) {
+                    return result.errors[0];
                 }
-        return null;
-    }
-});
+                return null;
+            }
+        });
 
-if (contractId === undefined) {
-    return; // User cancelled
-}
+        if (rawFunctionName === undefined) {
+            return; // User cancelled
+        }
 
-await workspaceStateService.setLastContractId(contractId);
-
-// Get the function name to call
-const functionName = await vscode.window.showInputBox({
-    prompt: 'Enter the function name to simulate',
-    placeHolder: 'e.g., transfer'
-});
-
-if (functionName === undefined) {
-    return; // User cancelled
-}
+        const functionNameResult = sanitizer.sanitizeFunctionName(rawFunctionName, { field: 'functionName' });
+        if (!functionNameResult.valid) {
+            vscode.window.showErrorMessage(`Invalid function name: ${functionNameResult.errors[0]}`);
+            return;
+        }
+        const functionName = functionNameResult.sanitizedValue;
 
 // Get function info and parameters
 const inspector = new ContractInspector(useLocalCli ? cliPath : rpcUrl, source);
@@ -81,10 +101,10 @@ const selectedFunction = contractFunctions.find(f => f.name === functionName);
 
 let args: any[] = [];
 
-if (selectedFunction && selectedFunction.inputs.length > 0) {
+if (selectedFunction && selectedFunction.parameters.length > 0) {
     // Show function parameters
     const paramInput = await vscode.window.showInputBox({
-        prompt: `Enter arguments for ${functionName}(${selectedFunction.inputs.map(i => `${i.name}: ${i.type}`).join(', ')})`,
+        prompt: `Enter arguments for ${functionName}(${selectedFunction.parameters.map((i: { name: string; type?: string }) => `${i.name}: ${i.type ?? 'any'}`).join(', ')})`,
         placeHolder: 'e.g., {"name": "world"}'
     });
 
@@ -136,7 +156,7 @@ if (selectedFunction && selectedFunction.inputs.length > 0) {
             contractId,
             functionName,
             args,
-            selectedFunction,
+            selectedFunction ?? null,
             contractFunctions
         );
 
@@ -216,7 +236,7 @@ if (selectedFunction && selectedFunction.inputs.length > 0) {
 let actualCliPath = cliPath;
 let cliService = new SorobanCliService(actualCliPath, source);
 
-if (!cliService.isCliAvailable()) {
+if (!await cliService.isAvailable()) {
     const foundPath = await SorobanCliService.findCliPath();
                         const suggestion = foundPath 
                             ? `\n\nFound Stellar CLI at: ${foundPath}\nUpdate your stellarSuite.cliPath setting to: "${foundPath}"`
