@@ -193,7 +193,7 @@ const copyContractIdCommand = vscode.commands.registerCommand(
 
     const exportHistoryCommand = vscode.commands.registerCommand(
       "stellarSuite.exportSimulationHistory",
-      () => exportSimulationHistory(context, simulationHistoryService!),
+      () => exportSimulationHistory(context),
     );
 
     const showVersionMismatchesCommand = vscode.commands.registerCommand(
@@ -289,35 +289,22 @@ const copyContractIdCommand = vscode.commands.registerCommand(
       },
     );
 
-const simulateFromSidebarCommand = vscode.commands.registerCommand(
-  "stellarSuite.simulateFromSidebar",
-  (contractId: string) =>
-    simulateTransaction(
-      context,
-      sidebarProvider,
-    ),
-);
+    const refreshCommand = vscode.commands.registerCommand(
+      "stellarSuite.refresh",
+      async () => {
+        sidebarProvider?.refresh();
+      },
+    );
 
-const refreshCommand = vscode.commands.registerCommand(
-  "stellarSuite.refresh",
-  async () => {
-    sidebarProvider?.refresh();
-  },
-);
-
-// 10. File Watchers
+    // 11. File Watchers (simulateFromSidebar)
     const simulateFromSidebarCommand = vscode.commands.registerCommand(
       "stellarSuite.simulateFromSidebar",
-      (contractId: string) =>
-        simulateTransaction(
-          context,
-          sidebarProvider,
-          simulationHistoryService,
-          cliHistoryService,
-          fallbackService,
-          resourceProfilingService,
-          contractId,
-        ),
+      (contractId: string) => {
+        if (typeof contractId === "string") {
+          context.workspaceState.update("selectedContractPath", contractId);
+        }
+        return simulateTransaction(context, sidebarProvider);
+      },
     );
 
     // 11. File Watchers
@@ -371,12 +358,6 @@ const refreshCommand = vscode.commands.registerCommand(
       }
       console.error("[Stellar Suite] Activation error:", error);
     }
-  }
-    console.error("[Stellar Suite] Activation error:", error);
-    vscode.window.showErrorMessage(
-      `Stellar Suite activation failed: ${errorMsg}`,
-    );
-  }
 }
 
 export function deactivate() {
