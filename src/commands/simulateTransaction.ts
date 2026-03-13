@@ -183,7 +183,7 @@ export async function simulateTransaction(context: vscode.ExtensionContext, side
 
         const panel = SimulationPanel.createOrShow(context);
         panel.updateResults(
-            { success: false, error: 'Running simulation...' },
+            { success: false, error: 'Running simulation...', type: 'simulation' },
             contractId,
             functionName,
             txArgs

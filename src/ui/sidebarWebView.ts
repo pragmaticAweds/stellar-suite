@@ -24,6 +24,14 @@ export class SidebarWebView {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Stellar Kit</title>
     <style>
+        :root {
+            --brand-bg: hsl(222, 47%, 6%);
+            --brand-primary: hsl(228, 76%, 60%);
+            --brand-secondary: hsl(217.2, 32.6%, 17.5%);
+            --brand-foreground: hsl(210, 40%, 96%);
+            --brand-border: hsl(217.2, 32.6%, 17.5%);
+        }
+
         * {
             box-sizing: border-box;
             margin: 0;
@@ -48,30 +56,33 @@ export class SidebarWebView {
         .header h2 {
             font-size: 14px;
             font-weight: 600;
+            color: var(--brand-primary);
         }
         .refresh-btn {
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
-            border: none;
+            background: var(--brand-secondary);
+            color: var(--brand-foreground);
+            border: 1px solid var(--brand-border);
             padding: 6px 12px;
-            border-radius: 4px;
+            border-radius: 6px;
             cursor: pointer;
-            font-size: 12px;
-            transition: background 0.2s;
+            font-size: 11px;
+            transition: all 0.2s;
         }
         .refresh-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+            background: var(--brand-primary);
+            color: white;
+            transform: translateY(-1px);
         }
         .section {
             margin-bottom: 24px;
         }
         .section-title {
-            font-size: 12px;
-            font-weight: 600;
-            margin-bottom: 8px;
-            color: var(--vscode-foreground);
+            font-size: 11px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            color: var(--vscode-descriptionForeground);
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 1px;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -84,14 +95,14 @@ export class SidebarWebView {
             color: var(--vscode-descriptionForeground);
             border: 1px solid var(--vscode-input-border);
             padding: 4px 8px;
-            border-radius: 3px;
+            border-radius: 4px;
             cursor: pointer;
             font-size: 10px;
             transition: all 0.2s;
         }
         .clear-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
-            color: var(--vscode-foreground);
+            border-color: var(--brand-primary);
+            color: var(--brand-primary);
         }
         .filter-bar {
             display: flex;
@@ -102,140 +113,167 @@ export class SidebarWebView {
         .filter-input {
             flex: 1;
             min-width: 120px;
-            padding: 6px 8px;
+            padding: 7px 10px;
             border: 1px solid var(--vscode-input-border);
             background: var(--vscode-input-background);
             color: var(--vscode-input-foreground);
-            border-radius: 4px;
+            border-radius: 6px;
             font-size: 11px;
+        }
+        .filter-input:focus {
+            outline: none;
+            border-color: var(--brand-primary);
         }
         .filter-select {
             padding: 6px 8px;
             border: 1px solid var(--vscode-input-border);
             background: var(--vscode-input-background);
             color: var(--vscode-input-foreground);
-            border-radius: 4px;
+            border-radius: 6px;
             font-size: 11px;
             cursor: pointer;
         }
         .contract-item, .deployment-item {
-            background: var(--vscode-list-inactiveSelectionBackground);
+            background: var(--vscode-sideBar-background);
             border: 1px solid var(--vscode-sideBar-border);
-            border-radius: 6px;
+            border-radius: 8px;
             padding: 12px;
-            margin-bottom: 8px;
-            transition: background 0.2s, box-shadow 0.2s;
+            margin-bottom: 10px;
+            transition: all 0.2s;
             overflow: hidden;
             word-wrap: break-word;
         }
         .contract-item:hover, .deployment-item:hover {
-            background: var(--vscode-list-hoverBackground);
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            border-color: var(--brand-primary);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
         .contract-name {
-            font-weight: 600;
+            font-weight: 700;
             font-size: 13px;
-            margin-bottom: 4px;
-            color: var(--vscode-textLink-foreground);
+            margin-bottom: 6px;
+            color: var(--brand-primary);
             word-break: break-all;
             overflow-wrap: break-word;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
         .contract-path {
             font-size: 11px;
             color: var(--vscode-descriptionForeground);
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             word-break: break-all;
+            opacity: 0.8;
         }
         .contract-id {
-            font-size: 11px;
-            font-family: var(--vscode-editor-font-family);
-            color: var(--vscode-textLink-foreground);
-            margin-bottom: 8px;
+            font-size: 10px;
+            font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
+            background: var(--brand-bg);
+            color: var(--brand-primary);
+            padding: 4px 8px;
+            border-radius: 4px;
+            margin-bottom: 10px;
             word-break: break-all;
-            overflow-wrap: break-word;
+            border: 1px solid var(--brand-border);
         }
         .contract-actions {
             display: flex;
-            gap: 8px;
-            margin-top: 8px;
+            gap: 6px;
+            margin-top: 10px;
             flex-wrap: wrap;
         }
         .btn {
-            padding: 6px 12px;
-            border: none;
-            border-radius: 6px;
+            padding: 8px 14px;
+            border: 1px solid var(--brand-primary);
+            border-radius: 8px;
             cursor: pointer;
             font-size: 11px;
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
+            font-weight: 600;
+            background: var(--brand-primary);
+            color: white;
             transition: all 0.2s;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
         }
         .btn:hover {
-            background: var(--vscode-button-hoverBackground);
-            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+            opacity: 0.9;
             transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
         }
         .btn-secondary {
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
+            background: var(--brand-bg);
+            color: var(--brand-primary);
+            border: 1px solid var(--brand-primary);
         }
         .btn-secondary:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+            background: var(--brand-primary);
+            color: white;
         }
         .status-badge-success {
             display: inline-block;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-size: 10px;
-            font-weight: 600;
-            margin-left: 8px;
-            background: var(--vscode-testing-iconPassed);
-            color: var(--vscode-editor-background);
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.2);
         }
         .empty-state {
             text-align: center;
-            padding: 24px;
+            padding: 32px 16px;
             color: var(--vscode-descriptionForeground);
             font-size: 12px;
+            font-style: italic;
         }
         .timestamp {
             font-size: 10px;
             color: var(--vscode-descriptionForeground);
-            margin-top: 4px;
+            margin-top: 6px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
         }
         #cli-history {
-            max-height: 200px;
+            max-height: 250px;
             overflow-y: auto;
+            border-radius: 8px;
+            background: var(--brand-bg);
+            border: 1px solid var(--brand-border);
+            padding: 8px;
         }
         .cli-entry {
-            padding: 6px 0;
-            border-bottom: 1px solid var(--vscode-sideBar-border);
+            padding: 8px;
+            border-bottom: 1px solid var(--brand-border);
             font-size: 11px;
         }
+        .cli-entry:last-child {
+            border-bottom: none;
+        }
         .cli-command {
-            font-family: var(--vscode-editor-font-family);
-            color: var(--vscode-foreground);
+            font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
+            color: var(--brand-primary);
             word-break: break-all;
         }
         .cli-timestamp {
-            font-size: 10px;
+            font-size: 9px;
             color: var(--vscode-descriptionForeground);
-            margin-top: 2px;
+            margin-top: 4px;
+            opacity: 0.7;
         }
         .clipboard-copy {
             cursor: pointer;
-            padding: 2px 4px;
-            border-radius: 3px;
-            transition: background 0.2s;
-            font-family: var(--vscode-editor-font-family);
-            font-size: 10px;
+            transition: all 0.2s;
         }
         .clipboard-copy:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+            background: var(--brand-secondary);
+            border-color: var(--brand-primary);
         }
         .icon-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+            background: var(--brand-secondary);
             transform: translateY(-1px);
         }
     </style>

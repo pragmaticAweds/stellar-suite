@@ -121,7 +121,7 @@ export async function runInvoke(context: vscode.ExtensionContext, sidebarProvide
 
         const panel = SimulationPanel.createOrShow(context);
         panel.updateResults(
-            { success: false, error: 'Running simulation...' }, // Reusing the same pending state logic
+            { success: false, error: 'Running simulation...', type: 'invocation' },
             contractId,
             functionName,
             invokeArgs
@@ -137,7 +137,7 @@ export async function runInvoke(context: vscode.ExtensionContext, sidebarProvide
                 progress.report({ message: 'Submitting transaction...' });
 
                 const cliService = new SorobanCliService(cliPath, source, rpcUrl, networkPassphrase);
-                const result = await cliService.simulateTransaction(contractId || '', functionName, invokeArgs, network);
+                const result = await cliService.simulateTransaction(contractId || '', functionName, invokeArgs, network, true);
 
                 panel.updateResults(result, contractId || '', functionName, invokeArgs);
 

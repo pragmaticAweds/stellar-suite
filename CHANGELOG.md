@@ -2,6 +2,16 @@
 
 All notable changes to the **Kit Studio** extension will be documented in this file.
 
+## [0.1.4] - 2026-03-13
+
+### Added
+- **Live Transaction IDs:** Run Tx now captures the real world Transaction ID from the blockchain and provides a direct link to view it on Stellar Expert 
+- **Unified Brand Experience:** Updated all webview panels (Simulation Result, Contract Info and Sidebar) to match the Stellar Kit ecosystem branding
+
+### Changed
+- **Dynamic Result Panels**
+- **Improved Real-time Feedback**
+
 ## [0.1.3] - 2026-03-12
 
 ### Added

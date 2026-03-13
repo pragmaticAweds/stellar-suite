@@ -37,8 +37,11 @@ function getEnvironmentWithPath(): NodeJS.ProcessEnv {
 
 export interface SimulationResult {
     success: boolean;
+    type?: 'simulation' | 'invocation';
     result?: any;
     error?: string;
+    transactionHash?: string;
+    network?: string;
     resourceUsage?: {
         cpuInstructions?: number;
         memoryBytes?: number;
@@ -65,7 +68,8 @@ export class SorobanCliService {
         contractId: string,
         functionName: string,
         args: any[],
-        network: string = 'testnet'
+        network: string = 'testnet',
+        send: boolean = false
     ): Promise<SimulationResult> {
         try {
             const commandParts = [
@@ -76,9 +80,13 @@ export class SorobanCliService {
                 '--source', this.source,
                 '--rpc-url', this.rpcUrl,
                 '--network-passphrase', this.networkPassphrase,
-                '--'
             ];
 
+            if (send) {
+                commandParts.push('--send', 'yes');
+            }
+
+            commandParts.push('--');
             commandParts.push(functionName);
 
             if (args.length > 0 && typeof args[0] === 'object' && !Array.isArray(args[0])) {
@@ -124,10 +132,22 @@ export class SorobanCliService {
 
             try {
                 const output = stdout.trim();
+                const combinedOutput = stdout + '\n' + stderr;
+                
+                // Parse transaction hash if present
+                let transactionHash: string | undefined;
+                const hashMatch = combinedOutput.match(/transaction:?\s*([a-f0-9]{64})/i);
+                if (hashMatch) {
+                    transactionHash = hashMatch[1];
+                }
+
                 try {
                     const parsed = JSON.parse(output);
                     return {
                         success: true,
+                        type: send ? 'invocation' : 'simulation',
+                        transactionHash,
+                        network,
                         result: parsed.result || parsed.returnValue || parsed,
                         resourceUsage: parsed.resource_usage || parsed.resourceUsage || parsed.cpu_instructions ? {
                             cpuInstructions: parsed.cpu_instructions,
@@ -138,9 +158,12 @@ export class SorobanCliService {
                     const jsonMatch = output.match(/\{[\s\S]*\}/);
                     if (jsonMatch) {
                         const parsed = JSON.parse(jsonMatch[0]);
-                        return {
-                            success: true,
-                            result: parsed.result || parsed.returnValue || parsed,
+                    return {
+                        success: true,
+                        type: send ? 'invocation' : 'simulation',
+                        transactionHash,
+                        network,
+                        result: parsed.result || parsed.returnValue || parsed,
                             resourceUsage: parsed.resource_usage || parsed.resourceUsage || parsed.cpu_instructions ? {
                                 cpuInstructions: parsed.cpu_instructions,
                                 memoryBytes: parsed.memory_bytes
@@ -149,6 +172,9 @@ export class SorobanCliService {
                     }
                     return {
                         success: true,
+                        type: send ? 'invocation' : 'simulation',
+                        transactionHash,
+                        network,
                         result: output
                     };
                 }

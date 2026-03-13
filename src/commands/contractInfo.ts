@@ -63,14 +63,54 @@ export async function contractInfo(context: vscode.ExtensionContext, args?: any)
                     <html>
                     <head>
                         <style>
-                            body { font-family: sans-serif; padding: 20px; line-height: 1.5; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
-                            pre { background: var(--vscode-textCodeBlock-background); padding: 15px; border-radius: 4px; overflow: auto; border: 1px solid var(--vscode-panel-border); }
-                            h2 { color: var(--vscode-textLink-foreground); border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 10px; }
+                            :root {
+                                --brand-bg: hsl(222, 47%, 6%);
+                                --brand-primary: hsl(228, 76%, 60%);
+                                --brand-secondary: hsl(217.2, 32.6%, 17.5%);
+                                --brand-foreground: hsl(210, 40%, 96%);
+                                --brand-border: hsl(217.2, 32.6%, 17.5%);
+                            }
+                            body { 
+                                font-family: var(--vscode-font-family); 
+                                padding: 24px; 
+                                line-height: 1.6; 
+                                color: var(--vscode-foreground); 
+                                background: var(--vscode-editor-background); 
+                            }
+                            .container {
+                                background: var(--vscode-sideBar-background);
+                                border: 1px solid var(--vscode-panel-border);
+                                border-radius: 12px;
+                                padding: 24px;
+                                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+                            }
+                            h2 { 
+                                color: var(--brand-primary); 
+                                font-size: 16px;
+                                text-transform: uppercase;
+                                letter-spacing: 1px;
+                                border-bottom: 1px solid var(--vscode-panel-border); 
+                                padding-bottom: 12px;
+                                margin-top: 0;
+                                margin-bottom: 20px;
+                            }
+                            pre { 
+                                background: var(--brand-bg); 
+                                color: var(--brand-primary);
+                                padding: 20px; 
+                                border-radius: 8px; 
+                                overflow: auto; 
+                                border: 1px solid var(--brand-border);
+                                font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
+                                font-size: 12px;
+                            }
                         </style>
                     </head>
                     <body>
-                        <h2>Metadata for ${contractId}</h2>
-                        <pre>${stdout}</pre>
+                        <div class="container">
+                            <h2>Metadata for ${contractId}</h2>
+                            <pre>${stdout}</pre>
+                        </div>
                     </body>
                     </html>
                 `;

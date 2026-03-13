@@ -51,6 +51,8 @@ export class SimulationPanel {
     }
 
     public updateResults(result: SimulationResult, contractId: string, functionName: string, args: any[]): void {
+        const typeLabel = result.type === 'invocation' ? 'Invocation' : 'Simulation';
+        this._panel.title = `Soroban ${typeLabel} Result`;
         this._panel.webview.html = this._getHtmlForResults(result, contractId, functionName, args);
     }
 
@@ -79,21 +81,46 @@ export class SimulationPanel {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Simulation Result</title>
     <style>
+        :root {
+            --brand-bg: hsl(222, 47%, 6%);
+            --brand-primary: hsl(228, 76%, 60%);
+            --brand-secondary: hsl(217.2, 32.6%, 17.5%);
+            --brand-foreground: hsl(210, 40%, 96%);
+            --brand-border: hsl(217.2, 32.6%, 17.5%);
+        }
         body {
             font-family: var(--vscode-font-family);
-            padding: 20px;
+            padding: 24px;
             color: var(--vscode-foreground);
             background-color: var(--vscode-editor-background);
+            line-height: 1.6;
         }
         .loading {
             text-align: center;
-            padding: 40px;
+            padding: 60px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+        }
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--brand-secondary);
+            border-top: 3px solid var(--brand-primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
     </style>
 </head>
 <body>
     <div class="loading">
-        <p>Running simulation...</p>
+        <div class="spinner"></div>
+        <p style="font-weight: 600; color: var(--brand-primary);">Processing Soroban Transaction...</p>
     </div>
 </body>
 </html>`;
@@ -123,10 +150,12 @@ export class SimulationPanel {
         let statusIcon = result.success ? '[OK]' : '[FAIL]';
         let statusText = result.success ? 'Success' : 'Failed';
 
+        const typeLabel = result.type === 'invocation' ? 'Invocation' : 'Simulation';
+
         if (!result.success && result.error === 'Running simulation...') {
             statusClass = 'pending';
             statusIcon = '[...]';
-            statusText = 'Simulating...';
+            statusText = result.type === 'invocation' ? 'Invoking...' : 'Simulating...';
         }
 
         const resourceUsageHtml = result.resourceUsage
@@ -137,6 +166,31 @@ export class SimulationPanel {
                     ${result.resourceUsage.cpuInstructions ? `<tr><td>CPU Instructions:</td><td>${result.resourceUsage.cpuInstructions.toLocaleString()}</td></tr>` : ''}
                     ${result.resourceUsage.memoryBytes ? `<tr><td>Memory:</td><td>${(result.resourceUsage.memoryBytes / 1024).toFixed(2)} KB</td></tr>` : ''}
                     ${result.resourceUsage.minResourceFee ? `<tr><td>Min Resource Fee:</td><td>${Number(result.resourceUsage.minResourceFee).toLocaleString()} stroops</td></tr>` : ''}
+                </table>
+            </div>
+            `
+            : '';
+
+        const explorerBaseUrl = result.network === 'mainnet'
+            ? 'https://stellar.expert/explorer/public/tx/'
+            : result.network === 'futurenet'
+                ? 'https://stellar.expert/explorer/futurenet/tx/'
+                : 'https://stellar.expert/explorer/testnet/tx/';
+
+        const transactionHtml = result.transactionHash
+            ? `
+            <div class="section">
+                <h3>Blockchain Transaction</h3>
+                <table>
+                    <tr>
+                        <td>Transaction ID:</td>
+                        <td>
+                            <code style="word-break: break-all;">${escapeHtml(result.transactionHash)}</code>
+                            <div style="margin-top: 8px;">
+                                <a href="${explorerBaseUrl}${result.transactionHash}" target="_blank" class="btn-link">View on Stellar Expert ↗</a>
+                            </div>
+                        </td>
+                    </tr>
                 </table>
             </div>
             `
@@ -175,76 +229,124 @@ export class SimulationPanel {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Simulation Result</title>
+    <title>${typeLabel} Result</title>
     <style>
+        :root {
+            --brand-bg: hsl(222, 47%, 6%);
+            --brand-primary: hsl(228, 76%, 60%);
+            --brand-secondary: hsl(217.2, 32.6%, 17.5%);
+            --brand-foreground: hsl(210, 40%, 96%);
+            --brand-border: hsl(217.2, 32.6%, 17.5%);
+        }
         body {
             font-family: var(--vscode-font-family);
-            padding: 20px;
+            padding: 24px;
             color: var(--vscode-foreground);
             background-color: var(--vscode-editor-background);
             line-height: 1.6;
         }
         .status {
-            padding: 12px 16px;
-            border-radius: 4px;
-            margin-bottom: 20px;
-            font-weight: 600;
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin-bottom: 24px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
         }
         .status.success {
-            background-color: var(--vscode-testing-iconPassed);
-            color: var(--vscode-editor-background);
+            background-color: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.3);
         }
         .status.error {
-            background-color: var(--vscode-testing-iconFailed);
-            color: var(--vscode-editor-background);
+            background-color: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.3);
         }
         .status.pending {
-            background-color: var(--vscode-progressBar-background);
-            color: var(--vscode-editor-background);
+            background-color: var(--brand-bg);
+            color: var(--brand-primary);
+            border: 1px solid var(--brand-border);
         }
         .section {
-            margin-bottom: 24px;
+            margin-bottom: 32px;
+            background: var(--vscode-sideBar-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 12px;
+            padding: 20px;
         }
         .section h3 {
             margin-top: 0;
-            margin-bottom: 12px;
-            color: var(--vscode-textLink-foreground);
+            margin-bottom: 16px;
+            color: var(--brand-primary);
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
             border-bottom: 1px solid var(--vscode-panel-border);
-            padding-bottom: 8px;
+            padding-bottom: 10px;
         }
         table {
             width: 100%;
             border-collapse: collapse;
         }
         table td {
-            padding: 8px 12px;
+            padding: 10px 12px;
             border-bottom: 1px solid var(--vscode-panel-border);
+            font-size: 13px;
+        }
+        table tr:last-child td {
+            border-bottom: none;
         }
         table td:first-child {
-            font-weight: 600;
+            font-weight: 700;
             width: 200px;
             color: var(--vscode-descriptionForeground);
         }
         pre {
-            background-color: var(--vscode-textCodeBlock-background);
-            padding: 12px;
-            border-radius: 4px;
+            background-color: var(--brand-bg);
+            color: var(--brand-primary);
+            padding: 16px;
+            border-radius: 8px;
             overflow-x: auto;
             margin: 8px 0;
-            border: 1px solid var(--vscode-panel-border);
+            border: 1px solid var(--brand-border);
+            font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
+            font-size: 12px;
         }
         .error-message {
-            background-color: var(--vscode-inputValidation-errorBackground);
-            color: var(--vscode-inputValidation-errorForeground);
-            padding: 12px;
-            border-radius: 4px;
-            border-left: 4px solid var(--vscode-inputValidation-errorBorder);
+            background-color: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            padding: 16px;
+            border-radius: 8px;
+            border-left: 4px solid #ef4444;
+            font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
         }
         .result-value {
-            background-color: var(--vscode-textCodeBlock-background);
-            padding: 12px;
-            border-radius: 4px;
-            border: 1px solid var(--vscode-panel-border);
+            background-color: var(--brand-bg);
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--brand-border);
+        }
+        .btn-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            background-color: var(--brand-primary);
+            color: white !important;
+            text-decoration: none;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            transition: all 0.2s;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .btn-link:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
         }
     </style>
 </head>
@@ -270,6 +372,7 @@ export class SimulationPanel {
                 ${formatValue(result.result)}
             </div>
         </div>
+        ${transactionHtml}
         ${resourceUsageHtml}
         ${eventsHtml}
         ${authHtml}

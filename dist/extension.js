@@ -132,7 +132,7 @@ var require_sorobanCliService = __commonJS({
         this.rpcUrl = rpcUrl;
         this.networkPassphrase = networkPassphrase;
       }
-      async simulateTransaction(contractId, functionName, args, network = "testnet") {
+      async simulateTransaction(contractId, functionName, args, network = "testnet", send = false) {
         try {
           const commandParts = [
             this.cliPath,
@@ -145,9 +145,12 @@ var require_sorobanCliService = __commonJS({
             "--rpc-url",
             this.rpcUrl,
             "--network-passphrase",
-            this.networkPassphrase,
-            "--"
+            this.networkPassphrase
           ];
+          if (send) {
+            commandParts.push("--send", "yes");
+          }
+          commandParts.push("--");
           commandParts.push(functionName);
           if (args.length > 0 && typeof args[0] === "object" && !Array.isArray(args[0])) {
             const argObj = args[0];
@@ -184,10 +187,19 @@ var require_sorobanCliService = __commonJS({
           }
           try {
             const output = stdout.trim();
+            const combinedOutput = stdout + "\n" + stderr;
+            let transactionHash;
+            const hashMatch = combinedOutput.match(/transaction:?\s*([a-f0-9]{64})/i);
+            if (hashMatch) {
+              transactionHash = hashMatch[1];
+            }
             try {
               const parsed = JSON.parse(output);
               return {
                 success: true,
+                type: send ? "invocation" : "simulation",
+                transactionHash,
+                network,
                 result: parsed.result || parsed.returnValue || parsed,
                 resourceUsage: parsed.resource_usage || parsed.resourceUsage || parsed.cpu_instructions ? {
                   cpuInstructions: parsed.cpu_instructions,
@@ -200,6 +212,9 @@ var require_sorobanCliService = __commonJS({
                 const parsed = JSON.parse(jsonMatch[0]);
                 return {
                   success: true,
+                  type: send ? "invocation" : "simulation",
+                  transactionHash,
+                  network,
                   result: parsed.result || parsed.returnValue || parsed,
                   resourceUsage: parsed.resource_usage || parsed.resourceUsage || parsed.cpu_instructions ? {
                     cpuInstructions: parsed.cpu_instructions,
@@ -209,6 +224,9 @@ var require_sorobanCliService = __commonJS({
               }
               return {
                 success: true,
+                type: send ? "invocation" : "simulation",
+                transactionHash,
+                network,
                 result: output
               };
             }
@@ -884,6 +902,8 @@ var require_simulationPanel = __commonJS({
         return _SimulationPanel.currentPanel;
       }
       updateResults(result, contractId, functionName, args) {
+        const typeLabel = result.type === "invocation" ? "Invocation" : "Simulation";
+        this._panel.title = `Soroban ${typeLabel} Result`;
         this._panel.webview.html = this._getHtmlForResults(result, contractId, functionName, args);
       }
       dispose() {
@@ -907,21 +927,46 @@ var require_simulationPanel = __commonJS({
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Simulation Result</title>
     <style>
+        :root {
+            --brand-bg: hsl(222, 47%, 6%);
+            --brand-primary: hsl(228, 76%, 60%);
+            --brand-secondary: hsl(217.2, 32.6%, 17.5%);
+            --brand-foreground: hsl(210, 40%, 96%);
+            --brand-border: hsl(217.2, 32.6%, 17.5%);
+        }
         body {
             font-family: var(--vscode-font-family);
-            padding: 20px;
+            padding: 24px;
             color: var(--vscode-foreground);
             background-color: var(--vscode-editor-background);
+            line-height: 1.6;
         }
         .loading {
             text-align: center;
-            padding: 40px;
+            padding: 60px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 16px;
+        }
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--brand-secondary);
+            border-top: 3px solid var(--brand-primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
     </style>
 </head>
 <body>
     <div class="loading">
-        <p>Running simulation...</p>
+        <div class="spinner"></div>
+        <p style="font-weight: 600; color: var(--brand-primary);">Processing Soroban Transaction...</p>
     </div>
 </body>
 </html>`;
@@ -942,10 +987,11 @@ var require_simulationPanel = __commonJS({
         let statusClass = result.success ? "success" : "error";
         let statusIcon = result.success ? "[OK]" : "[FAIL]";
         let statusText = result.success ? "Success" : "Failed";
+        const typeLabel = result.type === "invocation" ? "Invocation" : "Simulation";
         if (!result.success && result.error === "Running simulation...") {
           statusClass = "pending";
           statusIcon = "[...]";
-          statusText = "Simulating...";
+          statusText = result.type === "invocation" ? "Invoking..." : "Simulating...";
         }
         const resourceUsageHtml = result.resourceUsage ? `
             <div class="section">
@@ -954,6 +1000,23 @@ var require_simulationPanel = __commonJS({
                     ${result.resourceUsage.cpuInstructions ? `<tr><td>CPU Instructions:</td><td>${result.resourceUsage.cpuInstructions.toLocaleString()}</td></tr>` : ""}
                     ${result.resourceUsage.memoryBytes ? `<tr><td>Memory:</td><td>${(result.resourceUsage.memoryBytes / 1024).toFixed(2)} KB</td></tr>` : ""}
                     ${result.resourceUsage.minResourceFee ? `<tr><td>Min Resource Fee:</td><td>${Number(result.resourceUsage.minResourceFee).toLocaleString()} stroops</td></tr>` : ""}
+                </table>
+            </div>
+            ` : "";
+        const explorerBaseUrl = result.network === "mainnet" ? "https://stellar.expert/explorer/public/tx/" : result.network === "futurenet" ? "https://stellar.expert/explorer/futurenet/tx/" : "https://stellar.expert/explorer/testnet/tx/";
+        const transactionHtml = result.transactionHash ? `
+            <div class="section">
+                <h3>Blockchain Transaction</h3>
+                <table>
+                    <tr>
+                        <td>Transaction ID:</td>
+                        <td>
+                            <code style="word-break: break-all;">${escapeHtml(result.transactionHash)}</code>
+                            <div style="margin-top: 8px;">
+                                <a href="${explorerBaseUrl}${result.transactionHash}" target="_blank" class="btn-link">View on Stellar Expert \u2197</a>
+                            </div>
+                        </td>
+                    </tr>
                 </table>
             </div>
             ` : "";
@@ -984,76 +1047,124 @@ var require_simulationPanel = __commonJS({
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Simulation Result</title>
+    <title>${typeLabel} Result</title>
     <style>
+        :root {
+            --brand-bg: hsl(222, 47%, 6%);
+            --brand-primary: hsl(228, 76%, 60%);
+            --brand-secondary: hsl(217.2, 32.6%, 17.5%);
+            --brand-foreground: hsl(210, 40%, 96%);
+            --brand-border: hsl(217.2, 32.6%, 17.5%);
+        }
         body {
             font-family: var(--vscode-font-family);
-            padding: 20px;
+            padding: 24px;
             color: var(--vscode-foreground);
             background-color: var(--vscode-editor-background);
             line-height: 1.6;
         }
         .status {
-            padding: 12px 16px;
-            border-radius: 4px;
-            margin-bottom: 20px;
-            font-weight: 600;
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin-bottom: 24px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
         }
         .status.success {
-            background-color: var(--vscode-testing-iconPassed);
-            color: var(--vscode-editor-background);
+            background-color: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.3);
         }
         .status.error {
-            background-color: var(--vscode-testing-iconFailed);
-            color: var(--vscode-editor-background);
+            background-color: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.3);
         }
         .status.pending {
-            background-color: var(--vscode-progressBar-background);
-            color: var(--vscode-editor-background);
+            background-color: var(--brand-bg);
+            color: var(--brand-primary);
+            border: 1px solid var(--brand-border);
         }
         .section {
-            margin-bottom: 24px;
+            margin-bottom: 32px;
+            background: var(--vscode-sideBar-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 12px;
+            padding: 20px;
         }
         .section h3 {
             margin-top: 0;
-            margin-bottom: 12px;
-            color: var(--vscode-textLink-foreground);
+            margin-bottom: 16px;
+            color: var(--brand-primary);
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
             border-bottom: 1px solid var(--vscode-panel-border);
-            padding-bottom: 8px;
+            padding-bottom: 10px;
         }
         table {
             width: 100%;
             border-collapse: collapse;
         }
         table td {
-            padding: 8px 12px;
+            padding: 10px 12px;
             border-bottom: 1px solid var(--vscode-panel-border);
+            font-size: 13px;
+        }
+        table tr:last-child td {
+            border-bottom: none;
         }
         table td:first-child {
-            font-weight: 600;
+            font-weight: 700;
             width: 200px;
             color: var(--vscode-descriptionForeground);
         }
         pre {
-            background-color: var(--vscode-textCodeBlock-background);
-            padding: 12px;
-            border-radius: 4px;
+            background-color: var(--brand-bg);
+            color: var(--brand-primary);
+            padding: 16px;
+            border-radius: 8px;
             overflow-x: auto;
             margin: 8px 0;
-            border: 1px solid var(--vscode-panel-border);
+            border: 1px solid var(--brand-border);
+            font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
+            font-size: 12px;
         }
         .error-message {
-            background-color: var(--vscode-inputValidation-errorBackground);
-            color: var(--vscode-inputValidation-errorForeground);
-            padding: 12px;
-            border-radius: 4px;
-            border-left: 4px solid var(--vscode-inputValidation-errorBorder);
+            background-color: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            padding: 16px;
+            border-radius: 8px;
+            border-left: 4px solid #ef4444;
+            font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
         }
         .result-value {
-            background-color: var(--vscode-textCodeBlock-background);
-            padding: 12px;
-            border-radius: 4px;
-            border: 1px solid var(--vscode-panel-border);
+            background-color: var(--brand-bg);
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--brand-border);
+        }
+        .btn-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            background-color: var(--brand-primary);
+            color: white !important;
+            text-decoration: none;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 700;
+            transition: all 0.2s;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .btn-link:hover {
+            opacity: 0.9;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
         }
     </style>
 </head>
@@ -1078,6 +1189,7 @@ var require_simulationPanel = __commonJS({
                 ${formatValue(result.result)}
             </div>
         </div>
+        ${transactionHtml}
         ${resourceUsageHtml}
         ${eventsHtml}
         ${authHtml}
@@ -1286,7 +1398,7 @@ var require_simulateTransaction = __commonJS({
           }
         }
         const panel = simulationPanel_1.SimulationPanel.createOrShow(context);
-        panel.updateResults({ success: false, error: "Running simulation..." }, contractId, functionName, txArgs);
+        panel.updateResults({ success: false, error: "Running simulation...", type: "simulation" }, contractId, functionName, txArgs);
         await vscode2.window.withProgress({
           location: vscode2.ProgressLocation.Notification,
           title: "Simulating Soroban Transaction",
@@ -2848,13 +2960,7 @@ var require_runInvoke = __commonJS({
           }
         }
         const panel = simulationPanel_1.SimulationPanel.createOrShow(context);
-        panel.updateResults(
-          { success: false, error: "Running simulation..." },
-          // Reusing the same pending state logic
-          contractId,
-          functionName,
-          invokeArgs
-        );
+        panel.updateResults({ success: false, error: "Running simulation...", type: "invocation" }, contractId, functionName, invokeArgs);
         await vscode2.window.withProgress({
           location: vscode2.ProgressLocation.Notification,
           title: "Executing Live Soroban Invocation",
@@ -2862,7 +2968,7 @@ var require_runInvoke = __commonJS({
         }, async (progress) => {
           progress.report({ message: "Submitting transaction..." });
           const cliService = new sorobanCliService_12.SorobanCliService(cliPath, source, rpcUrl, networkPassphrase);
-          const result = await cliService.simulateTransaction(contractId || "", functionName, invokeArgs, network);
+          const result = await cliService.simulateTransaction(contractId || "", functionName, invokeArgs, network, true);
           panel.updateResults(result, contractId || "", functionName, invokeArgs);
           if (result.success) {
             vscode2.window.showInformationMessage("Live invocation completed successfully!");
@@ -2966,14 +3072,54 @@ var require_contractInfo = __commonJS({
                     <html>
                     <head>
                         <style>
-                            body { font-family: sans-serif; padding: 20px; line-height: 1.5; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
-                            pre { background: var(--vscode-textCodeBlock-background); padding: 15px; border-radius: 4px; overflow: auto; border: 1px solid var(--vscode-panel-border); }
-                            h2 { color: var(--vscode-textLink-foreground); border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 10px; }
+                            :root {
+                                --brand-bg: hsl(222, 47%, 6%);
+                                --brand-primary: hsl(228, 76%, 60%);
+                                --brand-secondary: hsl(217.2, 32.6%, 17.5%);
+                                --brand-foreground: hsl(210, 40%, 96%);
+                                --brand-border: hsl(217.2, 32.6%, 17.5%);
+                            }
+                            body { 
+                                font-family: var(--vscode-font-family); 
+                                padding: 24px; 
+                                line-height: 1.6; 
+                                color: var(--vscode-foreground); 
+                                background: var(--vscode-editor-background); 
+                            }
+                            .container {
+                                background: var(--vscode-sideBar-background);
+                                border: 1px solid var(--vscode-panel-border);
+                                border-radius: 12px;
+                                padding: 24px;
+                                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+                            }
+                            h2 { 
+                                color: var(--brand-primary); 
+                                font-size: 16px;
+                                text-transform: uppercase;
+                                letter-spacing: 1px;
+                                border-bottom: 1px solid var(--vscode-panel-border); 
+                                padding-bottom: 12px;
+                                margin-top: 0;
+                                margin-bottom: 20px;
+                            }
+                            pre { 
+                                background: var(--brand-bg); 
+                                color: var(--brand-primary);
+                                padding: 20px; 
+                                border-radius: 8px; 
+                                overflow: auto; 
+                                border: 1px solid var(--brand-border);
+                                font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
+                                font-size: 12px;
+                            }
                         </style>
                     </head>
                     <body>
-                        <h2>Metadata for ${contractId}</h2>
-                        <pre>${stdout}</pre>
+                        <div class="container">
+                            <h2>Metadata for ${contractId}</h2>
+                            <pre>${stdout}</pre>
+                        </div>
                     </body>
                     </html>
                 `;
@@ -3108,6 +3254,14 @@ var require_sidebarWebView = __commonJS({
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Stellar Kit</title>
     <style>
+        :root {
+            --brand-bg: hsl(222, 47%, 6%);
+            --brand-primary: hsl(228, 76%, 60%);
+            --brand-secondary: hsl(217.2, 32.6%, 17.5%);
+            --brand-foreground: hsl(210, 40%, 96%);
+            --brand-border: hsl(217.2, 32.6%, 17.5%);
+        }
+
         * {
             box-sizing: border-box;
             margin: 0;
@@ -3132,30 +3286,33 @@ var require_sidebarWebView = __commonJS({
         .header h2 {
             font-size: 14px;
             font-weight: 600;
+            color: var(--brand-primary);
         }
         .refresh-btn {
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
-            border: none;
+            background: var(--brand-secondary);
+            color: var(--brand-foreground);
+            border: 1px solid var(--brand-border);
             padding: 6px 12px;
-            border-radius: 4px;
+            border-radius: 6px;
             cursor: pointer;
-            font-size: 12px;
-            transition: background 0.2s;
+            font-size: 11px;
+            transition: all 0.2s;
         }
         .refresh-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+            background: var(--brand-primary);
+            color: white;
+            transform: translateY(-1px);
         }
         .section {
             margin-bottom: 24px;
         }
         .section-title {
-            font-size: 12px;
-            font-weight: 600;
-            margin-bottom: 8px;
-            color: var(--vscode-foreground);
+            font-size: 11px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            color: var(--vscode-descriptionForeground);
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 1px;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -3168,14 +3325,14 @@ var require_sidebarWebView = __commonJS({
             color: var(--vscode-descriptionForeground);
             border: 1px solid var(--vscode-input-border);
             padding: 4px 8px;
-            border-radius: 3px;
+            border-radius: 4px;
             cursor: pointer;
             font-size: 10px;
             transition: all 0.2s;
         }
         .clear-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
-            color: var(--vscode-foreground);
+            border-color: var(--brand-primary);
+            color: var(--brand-primary);
         }
         .filter-bar {
             display: flex;
@@ -3186,140 +3343,167 @@ var require_sidebarWebView = __commonJS({
         .filter-input {
             flex: 1;
             min-width: 120px;
-            padding: 6px 8px;
+            padding: 7px 10px;
             border: 1px solid var(--vscode-input-border);
             background: var(--vscode-input-background);
             color: var(--vscode-input-foreground);
-            border-radius: 4px;
+            border-radius: 6px;
             font-size: 11px;
+        }
+        .filter-input:focus {
+            outline: none;
+            border-color: var(--brand-primary);
         }
         .filter-select {
             padding: 6px 8px;
             border: 1px solid var(--vscode-input-border);
             background: var(--vscode-input-background);
             color: var(--vscode-input-foreground);
-            border-radius: 4px;
+            border-radius: 6px;
             font-size: 11px;
             cursor: pointer;
         }
         .contract-item, .deployment-item {
-            background: var(--vscode-list-inactiveSelectionBackground);
+            background: var(--vscode-sideBar-background);
             border: 1px solid var(--vscode-sideBar-border);
-            border-radius: 6px;
+            border-radius: 8px;
             padding: 12px;
-            margin-bottom: 8px;
-            transition: background 0.2s, box-shadow 0.2s;
+            margin-bottom: 10px;
+            transition: all 0.2s;
             overflow: hidden;
             word-wrap: break-word;
         }
         .contract-item:hover, .deployment-item:hover {
-            background: var(--vscode-list-hoverBackground);
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            border-color: var(--brand-primary);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
         .contract-name {
-            font-weight: 600;
+            font-weight: 700;
             font-size: 13px;
-            margin-bottom: 4px;
-            color: var(--vscode-textLink-foreground);
+            margin-bottom: 6px;
+            color: var(--brand-primary);
             word-break: break-all;
             overflow-wrap: break-word;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
         .contract-path {
             font-size: 11px;
             color: var(--vscode-descriptionForeground);
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             word-break: break-all;
+            opacity: 0.8;
         }
         .contract-id {
-            font-size: 11px;
-            font-family: var(--vscode-editor-font-family);
-            color: var(--vscode-textLink-foreground);
-            margin-bottom: 8px;
+            font-size: 10px;
+            font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
+            background: var(--brand-bg);
+            color: var(--brand-primary);
+            padding: 4px 8px;
+            border-radius: 4px;
+            margin-bottom: 10px;
             word-break: break-all;
-            overflow-wrap: break-word;
+            border: 1px solid var(--brand-border);
         }
         .contract-actions {
             display: flex;
-            gap: 8px;
-            margin-top: 8px;
+            gap: 6px;
+            margin-top: 10px;
             flex-wrap: wrap;
         }
         .btn {
-            padding: 6px 12px;
-            border: none;
-            border-radius: 6px;
+            padding: 8px 14px;
+            border: 1px solid var(--brand-primary);
+            border-radius: 8px;
             cursor: pointer;
             font-size: 11px;
-            background: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
+            font-weight: 600;
+            background: var(--brand-primary);
+            color: white;
             transition: all 0.2s;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
         }
         .btn:hover {
-            background: var(--vscode-button-hoverBackground);
-            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+            opacity: 0.9;
             transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
         }
         .btn-secondary {
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
+            background: var(--brand-bg);
+            color: var(--brand-primary);
+            border: 1px solid var(--brand-primary);
         }
         .btn-secondary:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+            background: var(--brand-primary);
+            color: white;
         }
         .status-badge-success {
             display: inline-block;
-            padding: 2px 6px;
-            border-radius: 3px;
-            font-size: 10px;
-            font-weight: 600;
-            margin-left: 8px;
-            background: var(--vscode-testing-iconPassed);
-            color: var(--vscode-editor-background);
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 9px;
+            font-weight: 700;
+            text-transform: uppercase;
+            background: rgba(34, 197, 94, 0.2);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.2);
         }
         .empty-state {
             text-align: center;
-            padding: 24px;
+            padding: 32px 16px;
             color: var(--vscode-descriptionForeground);
             font-size: 12px;
+            font-style: italic;
         }
         .timestamp {
             font-size: 10px;
             color: var(--vscode-descriptionForeground);
-            margin-top: 4px;
+            margin-top: 6px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
         }
         #cli-history {
-            max-height: 200px;
+            max-height: 250px;
             overflow-y: auto;
+            border-radius: 8px;
+            background: var(--brand-bg);
+            border: 1px solid var(--brand-border);
+            padding: 8px;
         }
         .cli-entry {
-            padding: 6px 0;
-            border-bottom: 1px solid var(--vscode-sideBar-border);
+            padding: 8px;
+            border-bottom: 1px solid var(--brand-border);
             font-size: 11px;
         }
+        .cli-entry:last-child {
+            border-bottom: none;
+        }
         .cli-command {
-            font-family: var(--vscode-editor-font-family);
-            color: var(--vscode-foreground);
+            font-family: 'JetBrains Mono', var(--vscode-editor-font-family);
+            color: var(--brand-primary);
             word-break: break-all;
         }
         .cli-timestamp {
-            font-size: 10px;
+            font-size: 9px;
             color: var(--vscode-descriptionForeground);
-            margin-top: 2px;
+            margin-top: 4px;
+            opacity: 0.7;
         }
         .clipboard-copy {
             cursor: pointer;
-            padding: 2px 4px;
-            border-radius: 3px;
-            transition: background 0.2s;
-            font-family: var(--vscode-editor-font-family);
-            font-size: 10px;
+            transition: all 0.2s;
         }
         .clipboard-copy:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+            background: var(--brand-secondary);
+            border-color: var(--brand-primary);
         }
         .icon-btn:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+            background: var(--brand-secondary);
             transform: translateY(-1px);
         }
     </style>
