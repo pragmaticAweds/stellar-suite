@@ -1,6 +1,8 @@
 import { useState } from "react";
-import { Rocket, Copy, ExternalLink, UserPlus, ShieldAlert, Key, Trash2 } from "lucide-react";
+import { Rocket, Copy, ExternalLink, UserPlus, ShieldAlert, Key, Trash2, Braces } from "lucide-react";
 import { useIdentityStore } from "@/store/useIdentityStore";
+import { useFileStore } from "@/store/useFileStore";
+import { resolveContractSchema } from "@/lib/contractAbiParser";
 import {
   Select,
   SelectContent,
@@ -21,8 +23,12 @@ export function ContractPanel({ contractId, onInvoke }: ContractPanelProps) {
   const [showManager, setShowManager] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [newNickname, setNewNickname] = useState("");
+  const [isResolvingAbi, setIsResolvingAbi] = useState(false);
+  const [schemaPreview, setSchemaPreview] = useState("");
+  const [schemaSource, setSchemaSource] = useState("");
 
   const { identities, activeContext, setActiveContext, generateNewIdentity, deleteIdentity } = useIdentityStore();
+  const { files, activeTabPath, horizonUrl, customRpcUrl, networkPassphrase, network } = useFileStore();
 
   const handleGenerate = async () => {
     if (!newNickname.trim()) return;
@@ -41,6 +47,30 @@ export function ContractPanel({ contractId, onInvoke }: ContractPanelProps) {
   const copyToClipboard = (text: string, label: string) => {
     navigator.clipboard.writeText(text);
     toast.success(`${label} copied to clipboard`);
+  };
+
+  const handleResolveAbi = async () => {
+    setIsResolvingAbi(true);
+
+    try {
+      const rpcUrl = network === "local" ? customRpcUrl : horizonUrl;
+      const result = await resolveContractSchema({
+        contractId,
+        files,
+        activeTabPath,
+        rpcUrl,
+        networkPassphrase,
+      });
+
+      setSchemaPreview(result.preview);
+      setSchemaSource(result.source === "contract-id" ? `Fetched from ${rpcUrl}` : `Parsed from ${result.source}`);
+      toast.success(`Parsed ${result.functions.length} contract function${result.functions.length === 1 ? "" : "s"}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to parse contract ABI";
+      toast.error(message);
+    } finally {
+      setIsResolvingAbi(false);
+    }
   };
 
   return (
@@ -235,6 +265,36 @@ export function ContractPanel({ contractId, onInvoke }: ContractPanelProps) {
             </div>
 
             <div className="border-t border-border pt-3 space-y-2">
+              <button
+                onClick={() => {
+                  void handleResolveAbi();
+                }}
+                disabled={isResolvingAbi}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded border border-border bg-muted text-foreground hover:bg-muted/80 disabled:opacity-50 transition-colors"
+              >
+                <Braces className="h-3.5 w-3.5" />
+                {isResolvingAbi ? "Parsing ABI..." : "Parse Contract ABI"}
+              </button>
+              {schemaPreview && (
+                <div className="rounded-md border border-border bg-muted/40 p-2 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Contract Schema</p>
+                      <p className="text-[9px] text-muted-foreground">{schemaSource}</p>
+                    </div>
+                    <button
+                      onClick={() => copyToClipboard(schemaPreview, "Contract schema")}
+                      className="p-1 hover:bg-background rounded text-muted-foreground hover:text-foreground transition-colors"
+                      title="Copy ABI preview"
+                    >
+                      <Copy className="h-3 w-3" />
+                    </button>
+                  </div>
+                  <pre className="max-h-40 overflow-auto rounded bg-background px-2 py-2 text-[9px] leading-relaxed text-foreground">
+                    {schemaPreview}
+                  </pre>
+                </div>
+              )}
               <p className="text-[10px] md:text-xs text-muted-foreground font-semibold uppercase tracking-wider">Resources</p>
               <a href="https://soroban.stellar.org/docs" target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-[10px] md:text-xs text-primary hover:underline">
                 <ExternalLink className="h-3 w-3" />
