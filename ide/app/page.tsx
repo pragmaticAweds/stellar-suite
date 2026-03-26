@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { CommandPalette } from "@/components/ide/CommandPalette";
+import { MobileGatekeeper } from "@/components/ide/MobileGatekeeper";
 import Index from "@/features/ide/Index";
 
 export default function HomePage() {
@@ -38,6 +39,7 @@ export default function HomePage() {
       <TooltipProvider>
         <Toaster />
         <Sonner />
+        <MobileGatekeeper />
         <Index />
         <CommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} />
       </TooltipProvider>
