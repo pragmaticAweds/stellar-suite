@@ -8,7 +8,9 @@ import { keysGenerate, keysFund, keysList } from './commands/keyManager';
 import { generateBindings } from './commands/generateBindings';
 import { runInvoke } from './commands/runInvoke';
 import { contractInfo } from './commands/contractInfo';
-import { initNetworkStatusBar } from './ui/networkStatusBar';
+import { analyzeSecurity } from './commands/analyzeSecurity';
+import { showNetworkHealth } from './commands/showNetworkHealth';
+import { initNetworkStatusBar, disposeNetworkStatusBar } from './ui/networkStatusBar';
 import { initIdentityStatusBar } from './ui/identityStatusBar';
 import { SidebarViewProvider } from './ui/sidebarView';
 import { getSharedOutputChannel } from './utils/outputChannel';
@@ -117,6 +119,14 @@ export async function activate(context: vscode.ExtensionContext) {
             return contractInfo(context, args);
         });
 
+        const analyzeSecurityCommand = vscode.commands.registerCommand('stellarSuite.analyzeSecurity', (args) => {
+            return analyzeSecurity(context, args);
+        });
+
+        const showNetworkHealthCommand = vscode.commands.registerCommand('stellarSuite.showNetworkHealth', () => {
+            return showNetworkHealth();
+        });
+
         const watcher = vscode.workspace.createFileSystemWatcher('**/{Cargo.toml,*.wasm}');
         watcher.onDidChange(() => {
             if (sidebarProvider) {
@@ -149,6 +159,8 @@ export async function activate(context: vscode.ExtensionContext) {
             generateBindingsCommand,
             runInvokeCommand,
             contractInfoCommand,
+            analyzeSecurityCommand,
+            showNetworkHealthCommand,
             watcher
         );
     } catch (error) {
@@ -157,4 +169,6 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 }
 
-export function deactivate() { }
+export function deactivate() {
+    disposeNetworkStatusBar();
+}

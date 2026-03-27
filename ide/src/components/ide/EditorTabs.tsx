@@ -9,7 +9,7 @@ import {
   Settings,
   X,
 } from "lucide-react";
-import { KeyboardEvent, useRef } from "react";
+import { KeyboardEvent, useRef, useCallback } from "react";
 
 export interface TabInfo {
   path: string[];
@@ -25,7 +25,7 @@ interface EditorTabsProps {
 }
 
 // ---------------------------------------------------------------------------
-// File icon resolver (matches FileTree.tsx convention)
+// File icon resolver
 // ---------------------------------------------------------------------------
 
 function FileIcon({ name }: { name: string }) {
@@ -76,31 +76,18 @@ function FileIcon({ name }: { name: string }) {
 // EditorTabs
 // ---------------------------------------------------------------------------
 
-/**
- * EditorTabs
- *
- * Horizontal, horizontally-scrollable tab bar above the Monaco editor.
- *
- * - Active tab has a top primary-colour border (VS Code style)
- * - Dirty (unsaved) tabs show a filled dot instead of the X button
- * - Hovering a dirty tab swaps the dot for the X so it can be closed
- * - Keyboard: Left/Right arrows move focus between tabs; Enter selects; Delete/Backspace closes
- */
 export function EditorTabs({ onTabSelect, onTabClose }: EditorTabsProps) {
-  const { openTabs, activeTabPath, setActiveTabPath, closeTab, unsavedFiles } =
-    useWorkspaceStore();
+  const { openTabs, activeTabPath, setActiveTabPath, closeTab, unsavedFiles } = useWorkspaceStore();
   const tabRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
 
   const tabsWithStatus = openTabs.map((t) => ({
     ...t,
     unsaved: unsavedFiles.has(t.path.join("/")),
   }));
+
   const activeTabKey = activeTabPath.join("/");
 
-  const handleKeyDown = (
-    e: KeyboardEvent<HTMLButtonElement>,
-    path: string[],
-  ) => {
+  const handleKeyDown = useCallback((e: KeyboardEvent<HTMLButtonElement>, path: string[]) => {
     const keys = tabsWithStatus.map((t) => t.path.join("/"));
     const currentIdx = keys.indexOf(path.join("/"));
 
@@ -125,15 +112,10 @@ export function EditorTabs({ onTabSelect, onTabClose }: EditorTabsProps) {
       if (onTabClose) onTabClose(path);
       else closeTab(path);
     }
-  };
+  }, [tabsWithStatus, onTabSelect, onTabClose, setActiveTabPath, closeTab]);
 
   if (tabsWithStatus.length === 0) {
-    return (
-      <div
-        className="h-9 bg-secondary border-b border-border"
-        aria-label="No open tabs"
-      />
-    );
+    return <div className="h-9 bg-secondary border-b border-border" aria-label="No open tabs" />;
   }
 
   return (
@@ -145,7 +127,7 @@ export function EditorTabs({ onTabSelect, onTabClose }: EditorTabsProps) {
       {tabsWithStatus.map((tab) => {
         const key = tab.path.join("/");
         const isActive = key === activeTabKey;
-        const isDirty = !!tab.unsaved;
+        const isDirty = tab.unsaved;
 
         return (
           <button
@@ -163,9 +145,10 @@ export function EditorTabs({ onTabSelect, onTabClose }: EditorTabsProps) {
                 ? "bg-tab-active text-foreground border-t-2 border-t-primary"
                 : "bg-tab-inactive text-muted-foreground hover:bg-tab-hover border-t-2 border-t-transparent"
             }`}
-            onClick={() =>
-              onTabSelect ? onTabSelect(tab.path) : setActiveTabPath(tab.path)
-            }
+            onClick={() => {
+              if (onTabSelect) onTabSelect(tab.path);
+              else setActiveTabPath(tab.path);
+            }}
             onKeyDown={(e) => handleKeyDown(e, tab.path)}
           >
             {/* File type icon */}

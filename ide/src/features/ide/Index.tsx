@@ -9,21 +9,26 @@ import {
 import CodeEditor from "@/components/ide/CodeEditor";
 import { ContractPanel } from "@/components/ide/ContractPanel";
 import { DeploymentsView } from "@/components/ide/DeploymentsView";
+import { GitPane } from "@/components/ide/GitPane";
+import { DiffEditorPane } from "@/components/editor/DiffEditorPane";
 import { EditorTabs } from "@/components/ide/EditorTabs";
 import { FileExplorer } from "@/components/ide/FileExplorer";
 import { IdentitiesView } from "@/components/ide/IdentitiesView";
+import { OracleAssistant } from "@/components/ide/OracleAssistant";
 import { SearchPane } from "@/components/ide/SearchPane";
 import { SecurityView } from "@/components/ide/SecurityView";
 import { StatusBar } from "@/components/ide/StatusBar";
 import { Terminal } from "@/components/ide/Terminal";
+import TestExplorer from "@/components/ide/TestExplorer";
 import { Toolbar } from "@/components/ide/Toolbar";
+import { OutlineView } from "@/components/sidebar/OutlineView";
 import { ActivityBar } from "@/components/layout/ActivityBar";
 import { type NetworkKey } from "@/lib/networkConfig";
 import { type FileNode } from "@/lib/sample-contracts";
 import { useDeployedContractsStore } from "@/store/useDeployedContractsStore";
 import { useDiagnosticsStore } from "@/store/useDiagnosticsStore";
 import { useIdentityStore } from "@/store/useIdentityStore";
-import { useWorkspaceStore } from "@/store/workspaceStore";
+import { useWorkspaceStore, flattenWorkspaceFiles } from "@/store/workspaceStore";
 import { parseCargoAuditOutput } from "@/utils/cargoAuditParser";
 import { parseMixedOutput } from "@/utils/cargoParser";
 import { parseClippyOutput, type ClippyLint } from "@/utils/clippyParser";
@@ -121,6 +126,9 @@ export default function Index() {
     updateFileContent,
     addTab,
     setActiveTabPath,
+    mockLedgerState,
+    diffViewPath,
+    setDiffViewPath,
   } = useWorkspaceStore();
 
   const { activeContext, activeIdentity, loadIdentities } = useIdentityStore();
@@ -366,12 +374,22 @@ export default function Index() {
 
   const handleTest = useCallback(() => {
     setTerminalExpanded(true);
+
+    if (mockLedgerState.entries.length > 0) {
+      appendTerminalOutput(
+        `Injecting ${mockLedgerState.entries.length} mock ledger ${mockLedgerState.entries.length === 1 ? "entry" : "entries"} via --ledger-snapshot...\r\n`
+      );
+      appendTerminalOutput(
+        `Mock state: ${JSON.stringify(mockLedgerState)}\r\n`
+      );
+    }
+
     appendTerminalOutput("Running tests...\r\n");
     setTimeout(() => {
       appendTerminalOutput("✓ test_hello ... ok\r\n");
       appendTerminalOutput("test result: ok. 1 passed; 0 failed;\r\n");
     }, 900);
-  }, [appendTerminalOutput, setTerminalExpanded]);
+  }, [appendTerminalOutput, setTerminalExpanded, mockLedgerState]);
 
   const handleInvoke = useCallback(
     async (fn: string, args: string) => {
@@ -469,6 +487,7 @@ export default function Index() {
                 }}
               />
             ) : null}
+            {leftSidebarTab === "outline" ? <OutlineView /> : null}
             {leftSidebarTab === "security" ? (
               <SecurityView
                 clippyLints={clippyLints}
@@ -484,13 +503,44 @@ export default function Index() {
                 lastAuditRunAt={lastAuditRunAt}
               />
             ) : null}
+            {leftSidebarTab === "tests" ? (
+              <TestExplorer
+                files={flattenWorkspaceFiles(files)}
+                onOpenTest={(test) => {
+                  const pathParts = test.filePath.split("/");
+                  const name = pathParts[pathParts.length - 1];
+                  addTab(pathParts, name);
+                  setActiveTabPath(pathParts);
+                }}
+                onRunTest={(test) => {
+                  setTerminalExpanded(true);
+                  if (mockLedgerState.entries.length > 0) {
+                    appendTerminalOutput(
+                      `Injecting ${mockLedgerState.entries.length} mock ledger ${mockLedgerState.entries.length === 1 ? "entry" : "entries"} via --ledger-snapshot...\r\n`
+                    );
+                  }
+                  appendTerminalOutput(
+                    `Running test ${test.testName} (${test.kind}) in ${test.filePath}:${test.line}\r\n`
+                  );
+                }}
+              />
+            ) : null}
+            {leftSidebarTab === "git" ? <GitPane /> : null}
           </aside>
         ) : null}
 
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <EditorTabs />
           <div className="min-h-0 flex-1 overflow-hidden">
-            <CodeEditor />
+            {diffViewPath ? (
+              <DiffEditorPane
+                path={diffViewPath}
+                currentContent={activeFileContext?.content ?? ""}
+                language={activeFileContext?.language ?? "text"}
+              />
+            ) : (
+              <CodeEditor />
+            )}
           </div>
           <div className="h-56 shrink-0 border-t border-border">
             <Terminal />

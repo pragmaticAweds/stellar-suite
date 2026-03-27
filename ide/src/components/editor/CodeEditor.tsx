@@ -1,6 +1,10 @@
 import type { FileNode } from "@/lib/sample-contracts";
 import { useDiagnosticsStore } from "@/store/useDiagnosticsStore";
+import { useCoverageStore } from "@/store/useCoverageStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
+import { applyEditsToTree, computeRenameEdits, validateRustIdentifier } from "@/utils/renameProvider";
+import { useDiagnosticsStore as _useDiagnosticsStore } from "@/store/useDiagnosticsStore";
+import { useEditorStore } from "@/store/editorStore";
 import Editor, { OnChange, OnMount } from "@monaco-editor/react";
 import type * as Monaco from "monaco-editor";
 import React, { Suspense, useEffect, useRef } from "react";
@@ -16,12 +20,17 @@ interface CodeEditorProps {
 const CodeEditor: React.FC<CodeEditorProps> = ({ onCursorChange, onSave }) => {
   const { activeTabPath, files, updateFileContent } = useWorkspaceStore();
   const { diagnostics } = useDiagnosticsStore();
-  const { config, setMathDiagnostics, getAllDiagnostics } =
-    useMathSafetyStore();
+  const { config, setMathDiagnostics, getAllDiagnostics } = useMathSafetyStore();
+  const { getFileCoverage } = useCoverageStore();
+  const { setJumpToLine } = useEditorStore();
   const rustProviderRegistered = useRef(false);
   const monacoRef = useRef<typeof Monaco | null>(null);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const semanticProviderRegistered = useRef(false);
+  const coverageDecorations = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null);
+  // Keep a live ref to files so the rename provider always sees the latest state
+  const filesRef = useRef(files);
+  useEffect(() => { filesRef.current = files; }, [files]);
 
   const activeFile = React.useMemo(() => {
     const findNode = (
@@ -98,9 +107,64 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ onCursorChange, onSave }) => {
     getAllDiagnostics,
   ]);
 
+  // Apply coverage gutter decorations whenever the active file or coverage data changes.
+  useEffect(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco) return;
+
+    const fileId = activeTabPath.join("/");
+    const fileCov = getFileCoverage(fileId);
+
+    // Lazily create the decoration collection once
+    if (!coverageDecorations.current) {
+      coverageDecorations.current = editor.createDecorationsCollection([]);
+    }
+
+    if (!fileCov) {
+      coverageDecorations.current.clear();
+      return;
+    }
+
+    const decorations: Monaco.editor.IModelDeltaDecoration[] = Object.entries(
+      fileCov.lines,
+    ).map(([lineStr, hits]) => {
+      const lineNumber = Number(lineStr);
+      const covered = hits > 0;
+      return {
+        range: new monaco.Range(lineNumber, 1, lineNumber, 1),
+        options: {
+          isWholeLine: true,
+          // Gutter icon — green dot for covered, red dot for uncovered
+          glyphMarginClassName: covered
+            ? "coverage-gutter-covered"
+            : "coverage-gutter-uncovered",
+          glyphMarginHoverMessage: {
+            value: covered
+              ? `✅ Covered (${hits} hit${hits === 1 ? "" : "s"})`
+              : "❌ Not covered",
+          },
+          // Subtle background tint — does not obscure text
+          className: covered
+            ? "coverage-line-covered"
+            : "coverage-line-uncovered",
+        },
+      };
+    });
+
+    coverageDecorations.current.set(decorations);
+  }, [activeTabPath, getFileCoverage]);
+
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     monacoRef.current = monaco;
     editorRef.current = editor;
+
+    // Register jump-to-line function for outline view
+    setJumpToLine((line: number) => {
+      editor.revealLineInCenter(line);
+      editor.setPosition({ lineNumber: line, column: 1 });
+      editor.focus();
+    });
 
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       onSave?.();
@@ -288,6 +352,74 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ onCursorChange, onSave }) => {
           return { suggestions };
         },
       });
+
+      // Workspace-wide rename provider (F2)
+      monaco.languages.registerRenameProvider("rust", {
+        provideRenameEdits(model, position, newName) {
+          const oldName = model.getWordAtPosition(position)?.word;
+          if (!oldName) return { edits: [] };
+
+          const validationError = validateRustIdentifier(newName);
+          if (validationError) return Promise.reject(new Error(validationError));
+
+          const { edits, matchCount, error } = computeRenameEdits(
+            filesRef.current,
+            oldName,
+            newName,
+          );
+
+          if (error) return Promise.reject(new Error(error));
+          if (matchCount === 0) return { edits: [] };
+
+          // Atomic update: compute the full new tree then write it in one setFiles call.
+          // Zustand's persist middleware flushes this to IndexedDB as a single transaction.
+          const { setFiles } = useWorkspaceStore.getState();
+          const nextTree = applyEditsToTree(filesRef.current, edits);
+          setFiles(nextTree);
+
+          // Invalidate the symbol index so the next build re-indexes from scratch.
+          _useDiagnosticsStore.getState().clearDiagnostics();
+
+          // Return workspace edits so Monaco can show the preview diff (F2 UI)
+          const workspaceEdits: Monaco.languages.WorkspaceEdit = {
+            edits: edits.flatMap((edit) => {
+              const uri = monaco.Uri.parse(`inmemory://workspace/${edit.fileId}`);
+              const lines = edit.newContent.split("\n");
+              return [
+                {
+                  resource: uri,
+                  textEdit: {
+                    range: {
+                      startLineNumber: 1,
+                      startColumn: 1,
+                      endLineNumber: lines.length,
+                      endColumn: lines[lines.length - 1].length + 1,
+                    },
+                    text: edit.newContent,
+                  },
+                  versionId: undefined,
+                },
+              ];
+            }),
+          };
+
+          return workspaceEdits;
+        },
+
+        resolveRenameLocation(model, position) {
+          const word = model.getWordAtPosition(position);
+          if (!word) return { range: new monaco.Range(0, 0, 0, 0), text: "" };
+          return {
+            range: new monaco.Range(
+              position.lineNumber,
+              word.startColumn,
+              position.lineNumber,
+              word.endColumn,
+            ),
+            text: word.word,
+          };
+        },
+      });
     }
   };
 
@@ -334,7 +466,7 @@ const CodeEditor: React.FC<CodeEditorProps> = ({ onCursorChange, onSave }) => {
               automaticLayout: true,
               tabSize: 4,
               lineNumbers: "on",
-              glyphMargin: false,
+              glyphMargin: true,
               folding: true,
               lineDecorationsWidth: 10,
               lineNumbersMinChars: 3,

@@ -5,19 +5,25 @@ import {
   Users,
   History,
   Search,
+  Beaker,
   ShieldAlert,
+  Plug,
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
+  ListTree,
 } from "lucide-react";
 import { ReactNode } from "react";
 
 export type ActivityTab =
   | "explorer"
+  | "git"
   | "deployments"
   | "identities"
   | "search"
-  | "security";
+  | "security"
+  | "tests";
+  | "outline";
 
 interface ActivityBarProps {
   activeTab: ActivityTab;
@@ -41,6 +47,12 @@ const tabs: ActivityBarTab[] = [
     title: "File Explorer",
   },
   {
+    id: "git",
+    icon: <History className="h-5 w-5 rotate-180" />, // Use History rotated as a placeholder for Git if GitBranch is not available or just to match look
+    label: "Source Control",
+    title: "Source Control (Git)",
+  },
+  {
     id: "deployments",
     icon: <History className="h-5 w-5" />,
     label: "History",
@@ -59,10 +71,28 @@ const tabs: ActivityBarTab[] = [
     title: "Search Files",
   },
   {
+    id: "outline",
+    icon: <ListTree className="h-5 w-5" />,
+    label: "Outline",
+    title: "Symbol Outline",
+  },
+  {
     id: "security",
     icon: <ShieldAlert className="h-5 w-5" />,
     label: "Security",
     title: "Security & Clippy",
+  },
+  {
+    id: "tests",
+    icon: <Beaker className="h-5 w-5" />,
+    label: "Tests",
+    title: "Test Explorer",
+  },
+  {
+    id: "oracle",
+    icon: <Plug className="h-5 w-5" />,
+    label: "Oracle",
+    title: "Oracle Integration Assistant",
   },
 ];
 
@@ -74,7 +104,6 @@ export function ActivityBar({
 }: ActivityBarProps) {
   return (
     <div className="hidden md:flex flex-col bg-sidebar border-r border-border shrink-0 w-12 items-center py-4 gap-4">
-      {/* Activity Tabs */}
       <div className="flex flex-col gap-2">
         {tabs.map((tab) => (
           <button
@@ -94,9 +123,7 @@ export function ActivityBar({
         ))}
       </div>
 
-      {/* Bottom Actions */}
       <div className="mt-auto border-t border-border w-full pt-4 flex flex-col items-center gap-2">
-        {/* Toggle Sidebar */}
         <button
           onClick={onToggleSidebar}
           className="p-2 text-muted-foreground hover:text-foreground transition-colors"
@@ -110,7 +137,6 @@ export function ActivityBar({
           )}
         </button>
 
-        {/* Settings */}
         <button
           className="p-2 text-muted-foreground hover:text-foreground transition-colors rounded-md hover:bg-muted"
           title="Settings"
